@@ -1,0 +1,10 @@
+numpy<2.0.0
+opencv-python-headless>=4.6.0
+pycuda>=2026.1
+onnxruntime>=1.18.0
+protobuf>=4.25.0
+flatbuffers>=23.5.26
+PySide6>=6.6.0
+Pillow>=10.0.0
+ultralytics>=8.0.0
+

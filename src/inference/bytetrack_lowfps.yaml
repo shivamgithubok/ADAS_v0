@@ -1,0 +1,9 @@
+# ByteTrack tuned for ~8–15 FPS ADAS video (Jetson Orin).
+# Larger buffer keeps IDs alive through missed detections.
+tracker_type: bytetrack
+track_high_thresh: 0.25
+track_low_thresh: 0.08
+new_track_thresh: 0.30
+track_buffer: 45
+match_thresh: 0.55
+fuse_score: True

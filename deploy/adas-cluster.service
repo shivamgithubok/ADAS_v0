@@ -1,0 +1,28 @@
+# Start the ADAS cluster full screen when the desktop session starts.
+#
+# Install (as the desktop user, not root):
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/adas-cluster.service ~/.config/systemd/user/
+#   # edit WorkingDirectory / ExecStart below to match your checkout and input
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now adas-cluster.service
+#
+# Logs:  journalctl --user -u adas-cluster -f
+# Stop:  systemctl --user stop adas-cluster
+
+[Unit]
+Description=ADAS instrument cluster
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/3d-lane-detection-onnx-ADAS_final
+Environment=DISPLAY=:0
+Environment=QSG_RHI_BACKEND=opengl
+ExecStart=%h/3d-lane-detection-onnx-ADAS_final/scripts/run_cluster.sh --camera 0 --speed obd --fullscreen
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target

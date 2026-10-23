@@ -1,0 +1,82 @@
+# Local environment and generated output
+venv/
+onnxruntime/
+output/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# Local videos and speed logs
+videos/
+testing_new_videos/
+*.mp4
+*.MP4
+!data/demo/clip_8s.mp4
+*.avi
+*.mov
+*.json
+
+# Images. Keep the README logo and Garmin HUD templates.
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+!data/demo/clip_8s.gif
+!data/demo/live_view.gif
+!data/demo/BEV.gif
+*.bmp
+*.tiff
+*.ico
+*.svg
+*.avif
+!data/Logo/logo.png
+!src/utils/assets/**
+!docs/cluster/**
+!src/ui/qml/assets/*.png
+
+# Notebooks, weights, and installers
+notebooks/
+get-pip.py
+*.pth
+*.pth.zip
+
+# TensorRT engines are built on the Jetson for that device. Keep the ONNX
+# weights; rebuild the engines with the export scripts.
+models/*.engine
+models/*.pt
+models/calib/
+models/midas_small.onnx
+models/monocular_depth.engine
+models/yolo26n-reid.onnx
+models/yolo26n.pt
+models/ufld_tusimple_288x800.onnx
+models/ufld_tusimple_288x800.engine
+models/tusimple_18.pth
+models/traffic_sign_yolo11n.pt
+
+# Data not used by the Qt Quick 3D pipeline
+data/3d_bike/
+data/3d_person/
+data/cache/
+data/front/
+data/images/
+data/sides_car/
+data/surround_view/
+data/traffic_signs/
+data/truck/
+data/3d_objects/dodge_ram_1500_rebel.glb
+
+# Code outside the run path
+src/surround_view/
+src/inference/tusimple_ufld.py
+src/inference/trt_depth_estimator.py
+
+# Scripts other than the app launcher and engine exporters
+scripts/*
+!scripts/run_pyside6_app.py
+!scripts/run_cluster.sh
+!scripts/export_yolo_orin.py
+!scripts/export_traffic_sign_orin.py
+!scripts/export_lprnet_orin.py
