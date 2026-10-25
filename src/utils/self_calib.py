@@ -99,19 +99,30 @@ def estimate_vanishing_point_from_video(
     stride: int = 12,
     start: int = 30,
 ) -> Optional[Tuple[float, float, int]]:
+    """Median vanishing point over the clip, not just the opening seconds.
+
+    The first few seconds are often an intersection or a turn, where lane
+    lines do not meet. Samples are spread from 15% to 85% of the file, then
+    points far from the median are dropped.
+    """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         return None
     n_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    if n_total > n_frames * 2:
+        lo = int(0.15 * n_total)
+        hi = max(lo + 1, int(0.85 * n_total))
+        frames = np.linspace(lo, hi, int(n_frames)).astype(int)
+    else:
+        frames = [start + i * stride for i in range(n_frames)]
+        if n_total > 0:
+            frames = [fi for fi in frames if fi < n_total]
     us, vs = [], []
-    for i in range(n_frames):
-        fi = start + i * stride
-        if n_total > 0 and fi >= n_total:
-            break
-        cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
+    for fi in frames:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(fi))
         ok, frame = cap.read()
         if not ok:
-            break
+            continue
         hit = estimate_vanishing_point_on_frame(frame)
         if hit is None:
             continue
@@ -120,7 +131,15 @@ def estimate_vanishing_point_from_video(
     cap.release()
     if len(us) < 3:
         return None
-    return float(np.median(us)), float(np.median(vs)), len(us)
+    u_med, v_med = float(np.median(us)), float(np.median(vs))
+    keep = [
+        (u, v) for u, v in zip(us, vs)
+        if abs(u - u_med) < 80.0 and abs(v - v_med) < 40.0
+    ]
+    if len(keep) < 3:
+        keep = list(zip(us, vs))
+    arr = np.array(keep, dtype=np.float64)
+    return float(np.median(arr[:, 0])), float(np.median(arr[:, 1])), int(len(keep))
 
 
 def bootstrap_calib(

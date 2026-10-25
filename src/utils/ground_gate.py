@@ -63,6 +63,15 @@ CLASS_WIDTH_M = {
 }
 WIDTH_GATE_SLACK = 1.9   # generous: box width is noisy, we only want blunders
 
+# Nominal body width used to step in from the visible outer edge.
+NOMINAL_WIDTH_M = {
+    "car": 1.85,
+    "motorcycle": 0.8,
+    "bike": 0.7,
+    "bus": 2.55,
+    "truck": 2.5,
+}
+
 
 @dataclass
 class GroundMeasurement:
@@ -134,6 +143,8 @@ def measure_ground(
     if road_mask is not None and not _on_mask(road_mask, u, v):
         return _rejected(u, v, GateResult.OFF_ROAD)
 
+    x_m = vehicle_center_x(bbox, calib, label, x_m, frame_shape)
+
     return GroundMeasurement(
         x_m=x_m,
         y_m=y_m,
@@ -143,6 +154,42 @@ def measure_ground(
         v=v,
         result=GateResult.OK,
     )
+
+
+def vehicle_center_x(
+    bbox: Sequence[float],
+    calib: GroundCalibration,
+    label: str,
+    x_bottom_m: float,
+    frame_shape: Optional[Tuple[int, int]] = None,
+) -> float:
+    """Lateral centre of a vehicle's body from its box.
+
+    A car beside the ego shows its rear *and* its inner side face, so the box
+    bottom-centre sits between the rear and the side and reads closer to the
+    ego than the car is. The outer box edge is the rear corner at the contact
+    row; stepping in by half a body width gives the true centre. A box that
+    straddles the vanishing point shows no side face, and a box clipped on its
+    outer edge has no outer corner, so both keep the bottom-centre.
+    """
+    x1, _y1, x2, y2 = (float(c) for c in bbox)
+    u_vp = float(calib.u_vp)
+    if x1 <= u_vp <= x2:
+        return float(x_bottom_m)
+    w_img = None if frame_shape is None else float(frame_shape[1])
+    left_side = x2 < u_vp
+    if left_side and x1 <= EDGE_TOUCH_PX:
+        return float(x_bottom_m)
+    if not left_side and w_img is not None and x2 >= w_img - EDGE_TOUCH_PX:
+        return float(x_bottom_m)
+    edge_l = calib.backproject_ground(x1, y2)
+    edge_r = calib.backproject_ground(x2, y2)
+    if edge_l is None or edge_r is None:
+        return float(x_bottom_m)
+    xa, xb = edge_l[0], edge_r[0]
+    half = 0.5 * min(NOMINAL_WIDTH_M.get(str(label).lower(), 1.85), abs(xb - xa))
+    centre = xa + half if left_side else xb - half
+    return float(np.clip(centre, min(xa, xb), max(xa, xb)))
 
 
 def _on_mask(mask: np.ndarray, u: float, v: float, pad: int = 4) -> bool:

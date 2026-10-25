@@ -26,6 +26,7 @@ from src.inference.lprnet import LPRNetRecognizer, annotate_speed_dets, default_
 from src.inference.ldw_fcw import AdasWarningTracker, draw_adas_alerts
 from src.utils.paint_snap import LaneDrawStabilizer
 from src.utils.split_visualization import draw_front_view_cipo
+from src.utils import lane_debug_overlay
 from src.utils.camera_transform import CameraTransform
 from src.tracking.road_state import RoadStateEstimator
 from src.utils.speed_source import make_speed_source
@@ -419,6 +420,9 @@ class InferenceWorker(QThread):
                 left_3d, right_3d = None, None
                 road_state = None
                 # Speed comes from its own source, engines or not.
+                # A Garmin overlay is read from this frame when no JSON log exists.
+                if frame is not None:
+                    speed_src.observe(frame, frame_i)
                 speed_mps = speed_src.get_mps(frame_i) if frame is not None else None
                 alerts_snap = {
                     "ldw": "OFF",
@@ -498,9 +502,13 @@ class InferenceWorker(QThread):
                                 self._last_sign_dets,
                                 ran_infer=True,
                                 use_class=self._isa_use_class,
+                                frame_shape=frame.shape,
                             )
                         else:
-                            self.isa.update([], ran_infer=False, use_class=self._isa_use_class)
+                            self.isa.update(
+                                [], ran_infer=False, use_class=self._isa_use_class,
+                                frame_shape=frame.shape,
+                            )
 
                     # Step C: CIPO Tracker & 3D In-Path Association
                     h_frame, w_frame = frame.shape[:2]
@@ -525,6 +533,7 @@ class InferenceWorker(QThread):
                             right_corridor_3d=right_3d,
                             dt=source_dt,
                             ego_speed_mps=speed_mps,
+                            lane_world=getattr(road_state, "lane_world", None),
                         )
                         cipo_status = tracker.last_cipo_status
 
@@ -552,6 +561,10 @@ class InferenceWorker(QThread):
                     road_state is not None and getattr(road_state, "status", "") == "PREDICTED"
                 )
                 alerts_snap["speed_source"] = speed_src.label
+                lane_world = getattr(road_state, "lane_world", None)
+                alerts_snap["lane_world"] = lane_world
+                if lane_world is not None and lane_world.event:
+                    print(f"[LaneWorld] frame {frame_i}: {lane_world.event}")
 
                 # Step D: All rendering reads the same validated temporal road state.
                 if frame is None or not use_trt:
@@ -580,6 +593,17 @@ class InferenceWorker(QThread):
                         ego_speed_mps=speed_mps,
                         show_lanes=bool(self.show_lane_draw),
                     )
+                    if lane_debug_overlay.enabled() and annotated_frame.shape[:2] == frame.shape[:2]:
+                        if lane_world is not None and lane_world.event:
+                            self._lane_debug_event = f"f{frame_i}: {lane_world.event}"
+                        annotated_frame = lane_debug_overlay.draw_lane_world_debug(
+                            annotated_frame,
+                            lane_world,
+                            self.ground_calib,
+                            objects=processed_objs,
+                            lines=proposals,
+                            last_event=getattr(self, "_lane_debug_event", ""),
+                        )
                     if self.sign_detector is not None:
                         ego_mph = None
                         if speed_mps is not None:

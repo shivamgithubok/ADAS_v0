@@ -126,11 +126,16 @@ class LaneTrackerManager:
         self.trackers = [trk for trk in self.trackers if trk.misses <= self.max_missed_frames]
 
         smoothed_lanes = []
+        # Parallel to the return value: True when the track was matched to a
+        # detection this frame, False while it coasts on its own prediction.
+        self.last_fresh = []
         for trk in self.trackers:
             if self.require_confirmed:
-                if trk.is_confirmed:
-                    smoothed_lanes.append(trk.get_lane_points(y_steps))
-            elif trk.is_confirmed or trk.hits >= max(1, self.confirm_hits // 2):
+                keep = trk.is_confirmed
+            else:
+                keep = trk.is_confirmed or trk.hits >= max(1, self.confirm_hits // 2)
+            if keep:
                 smoothed_lanes.append(trk.get_lane_points(y_steps))
+                self.last_fresh.append(trk.misses == 0)
 
         return smoothed_lanes

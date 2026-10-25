@@ -396,8 +396,9 @@ class ClusterController(QObject):
         # Speed limit (sign OCR reads US mph plates)
         isa = alerts.get("isa") or {}
         posted = isa.get("posted_mph")
-        cand = isa.get("candidate_mph")
-        lim = posted if posted is not None else cand
+        # Candidate flips every class change (65 → 50 → 30). The plate shows
+        # only a limit that has already been confirmed.
+        lim = posted
         if lim is not None and kmh:
             lim = int(round(float(lim) * 1.609344 / 5.0) * 5)
         hud["limit"] = None if lim is None else int(lim)

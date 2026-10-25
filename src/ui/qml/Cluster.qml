@@ -805,25 +805,136 @@ Item {
                 }
             }
 
-            Text {
+            Item { width: 1; height: 12 }
+
+            // Donut speed. Ticks run the full circle. The cyan arc starts at
+            // the lower left and travels along the bottom as speed rises.
+            Item {
+                width: 300
+                height: speedGauge.height
+                Item {
+                id: speedGauge
                 anchors.horizontalCenter: parent.horizontalCenter
-                topPadding: 18
-                text: app.val("speedText", "--")
-                color: "#FFFFFF"
-                font.family: app.displayFont
-                font.pixelSize: 136
-                font.weight: Font.Bold
-                font.letterSpacing: -2
-                font.features: { "tnum": 1 }
-                style: Text.Normal
+                width: 214
+                height: 214
+
+                readonly property string speedLabel: app.val("speedText", "--")
+                readonly property bool hasSpeed: speedLabel !== "--" && speedLabel !== ""
+                readonly property real speedValue: {
+                    const n = Number(speedLabel)
+                    return hasSpeed && !isNaN(n) ? Math.max(0, n) : 0
+                }
+                readonly property real speedMax: app.val("units", "mph") === "kmh" ? 260 : 160
+                // On screen, 0° is 3 o'clock and positive angles run clockwise.
+                // 152° is the lower left; a negative sweep travels along the bottom.
+                readonly property real startAngle: 152
+                readonly property real sweepMax: 230
+                property real sweep: hasSpeed
+                        ? -Math.min(1, speedValue / speedMax) * sweepMax : 0
+                readonly property real arcR: width / 2 - 9
+                readonly property real endAngle: startAngle + sweep
+                readonly property real tipX: width / 2 + arcR * Math.cos(endAngle * Math.PI / 180)
+                readonly property real tipY: height / 2 + arcR * Math.sin(endAngle * Math.PI / 180)
+
+                Behavior on sweep {
+                    NumberAnimation { duration: 220; easing.type: Easing.OutCubic }
+                }
+
+                Repeater {
+                    model: 60
+                    Item {
+                        width: 2
+                        height: speedGauge.height
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        rotation: index * 6
+                        Rectangle {
+                            readonly property bool major: index % 5 === 0
+                            width: major ? 2.2 : 1.4
+                            height: major ? 11 : 7
+                            radius: 1
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            anchors.top: parent.top
+                            anchors.topMargin: 2
+                            antialiasing: true
+                            color: major ? "#F4F7FB" : Qt.rgba(244 / 255, 247 / 255, 251 / 255, 0.42)
+                        }
+                    }
+                }
+
+                Shape {
+                    id: speedArc
+                    anchors.fill: parent
+                    visible: speedGauge.hasSpeed && speedGauge.sweep < -0.5
+                    ShapePath {
+                        strokeColor: Qt.rgba(76 / 255, 214 / 255, 255 / 255, 0.30)
+                        strokeWidth: 14
+                        fillColor: "transparent"
+                        capStyle: ShapePath.RoundCap
+                        PathAngleArc {
+                            centerX: speedGauge.width / 2
+                            centerY: speedGauge.height / 2
+                            radiusX: speedGauge.arcR
+                            radiusY: speedGauge.arcR
+                            startAngle: speedGauge.startAngle
+                            sweepAngle: speedGauge.sweep
+                        }
+                    }
+                    ShapePath {
+                        strokeColor: app.infoCyan
+                        strokeWidth: 8
+                        fillColor: "transparent"
+                        capStyle: ShapePath.RoundCap
+                        PathAngleArc {
+                            centerX: speedGauge.width / 2
+                            centerY: speedGauge.height / 2
+                            radiusX: speedGauge.arcR
+                            radiusY: speedGauge.arcR
+                            startAngle: speedGauge.startAngle
+                            sweepAngle: speedGauge.sweep
+                        }
+                    }
+                }
+
+                Rectangle {
+                    visible: speedArc.visible
+                    width: 10
+                    height: 10
+                    radius: 5
+                    color: "#F4FDFF"
+                    x: speedGauge.tipX - width / 2
+                    y: speedGauge.tipY - height / 2
+                }
+
+                Item {
+                    anchors.centerIn: parent
+                    width: Math.max(speedNum.implicitWidth, speedUnit.implicitWidth)
+                    height: speedNum.implicitHeight + speedUnit.implicitHeight - 4
+                    Text {
+                        id: speedNum
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        anchors.top: parent.top
+                        text: speedGauge.speedLabel
+                        color: "#FFFFFF"
+                        font.family: app.displayFont
+                        font.pixelSize: 68
+                        font.weight: Font.Bold
+                        font.letterSpacing: -1
+                        font.features: { "tnum": 1 }
+                    }
+                    Text {
+                        id: speedUnit
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        anchors.top: speedNum.bottom
+                        anchors.topMargin: -4
+                        text: app.val("speedUnit", "MPH")
+                        color: app.textSecondary
+                        font.family: app.uiFont
+                        font.pixelSize: 16
+                        font.weight: Font.Medium
+                        font.letterSpacing: 1.6
+                    }
+                }
             }
-            Text {
-                anchors.horizontalCenter: parent.horizontalCenter
-                topPadding: 4
-                text: app.val("speedUnit", "MPH")
-                color: app.textSecondary
-                font.family: app.uiFont; font.pixelSize: 28; font.weight: Font.Medium
-                font.letterSpacing: 2
             }
             Text {
                 anchors.horizontalCenter: parent.horizontalCenter

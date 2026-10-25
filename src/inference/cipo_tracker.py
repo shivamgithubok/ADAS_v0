@@ -6,6 +6,7 @@ from src.inference import lane_filter_config as cfg
 from src.utils.ground_calib import GroundCalibration
 from src.utils.ground_gate import GateResult, measure_ground
 from src.tracking.bev_kalman import BevTracker
+from src.tracking.lane_world import ObjectLaneAssigner
 
 # Single source of truth: cam_height=1.5m, pitch=-3°, then crop/resize to 480x360
 # (same as src.utils.calibration.P_final — do not hardcode a divergent copy)
@@ -146,7 +147,7 @@ class CIPOTracker:
         self._hist_frame = 0
         self._hist_ttl = KILL_FRAMES
         self._inpath_state = {}         # tid -> {in_path, hits, miss, score}
-        self._lane_last = {}            # tid -> (lane_index, offset_m, frame)
+        self.lane_assigner = ObjectLaneAssigner()
         self._cipo_tid = None
         self._status_band = "SAFE"
         self.last_cipo_status = "SAFE"
@@ -265,124 +266,6 @@ class CIPOTracker:
         y_t = float(np.clip(y_target, ys[0], ys[-1]))
         return float(np.interp(y_t, ys, xs))
 
-    def _lane_aware_x(self, u_model, v_model, y_fwd, x_geom, proposals):
-        """
-        Snap lateral X to a detected-lane center.
-
-        Using only the ego pair collapses every adjacent car into one slot
-        (they overlap on the BEV). All lane lines at this depth are used.
-        """
-        if proposals is None or len(proposals) == 0:
-            return x_geom
-
-        samples = []
-        for lane in proposals:
-            u = self.get_2d_lane_u_at_v(lane, v_model)
-            x = self.get_lane_x_at_y(lane, y_fwd)
-            if u is None and x is None:
-                continue
-            samples.append((u, x))
-
-        xs = sorted(x for _, x in samples if x is not None)
-        uniq = []
-        for x in xs:
-            if not uniq or abs(x - uniq[-1]) > 0.8:
-                uniq.append(x)
-        xs = uniq
-        if not xs:
-            return x_geom
-
-        if len(xs) == 1:
-            w = STANDARD_LANE_WIDTH
-            centers = [xs[0] - w, xs[0], xs[0] + w]
-        else:
-            widths = [xs[i + 1] - xs[i] for i in range(len(xs) - 1)]
-            med_w = float(np.median(widths))
-            med_w = max(2.8, min(4.6, med_w))
-            centers = [xs[0] - 0.5 * med_w]
-            for i in range(len(xs) - 1):
-                centers.append(0.5 * (xs[i] + xs[i + 1]))
-            centers.append(xs[-1] + 0.5 * med_w)
-
-        with_u = [(u, x) for u, x in samples if u is not None and x is not None]
-        with_u.sort(key=lambda t: t[0])
-        snapped = None
-        if len(with_u) >= 2:
-            us = [t[0] for t in with_u]
-            xsu = [t[1] for t in with_u]
-            if u_model <= us[0]:
-                snapped = centers[0]
-            elif u_model >= us[-1]:
-                snapped = centers[-1]
-            else:
-                for i in range(len(us) - 1):
-                    if us[i] <= u_model <= us[i + 1]:
-                        snapped = 0.5 * (xsu[i] + xsu[i + 1])
-                        break
-        if snapped is None:
-            snapped = min(centers, key=lambda c: abs(c - x_geom))
-
-        # Small within-lane offset from geometry, without collapsing lanes
-        return snapped + 0.12 * float(np.clip(x_geom - snapped, -1.5, 1.5))
-
-    def _lane_from_image(
-        self, u_model, v_model, x_3d, y_fwd, ego_left, ego_right,
-        u1=None, u2=None, left_3d=None, right_3d=None,
-    ):
-        """Signed lane index from the *image*, plus a small within-lane offset.
-
-        Object metric X and OpenLane lane X are different cameras. The BEV
-        ribbon is the lane net; the box the user sees is YOLO. Match those
-        two, not X_3d vs the corridor.
-        0 = ego, −1 left, +1 right.
-        """
-        lane_w = STANDARD_LANE_WIDTH
-        x_left = self.get_lane_x_at_y(ego_left, y_fwd)
-        x_right = self.get_lane_x_at_y(ego_right, y_fwd)
-        if x_left is not None and x_right is not None:
-            lane_w = float(np.clip(abs(x_right - x_left), 2.8, 4.6))
-
-        u_left, u_right = self._ego_u_pair(
-            v_model, ego_left, ego_right, left_3d, right_3d, slack_px=24.0
-        )
-        if u_left is not None and u_right is not None:
-            if u_right < u_left:
-                u_left, u_right = u_right, u_left
-            width_px = max(18.0, float(u_right - u_left))
-            pad = 0.22 * width_px
-            # YOLO boxes sit a bit left of centre; paint u is noisy. Stay ego
-            # unless the box is clearly outside the pair.
-            overlap = 0.0
-            if u1 is not None and u2 is not None and u2 > u1:
-                overlap = _interval_overlap(u1, u2, u_left, u_right) / (u2 - u1)
-            if overlap >= 0.45 or (u_left - pad <= u_model <= u_right + pad):
-                idx = 0
-                frac = (u_model - u_left) / width_px
-            elif u_model < u_left - pad:
-                n = int(np.floor((u_left - u_model) / width_px + 0.5))
-                idx = -int(np.clip(max(1, n), 1, 2))
-                lane_l = u_left + idx * width_px
-                frac = (u_model - lane_l) / width_px
-            else:
-                n = int(np.floor((u_model - u_right) / width_px + 0.5))
-                idx = int(np.clip(max(1, n), 1, 2))
-                lane_l = u_right + (idx - 1) * width_px
-                frac = (u_model - lane_l) / width_px
-            offset = float(np.clip((frac - 0.5) * lane_w, -1.15, 1.15))
-            return idx, offset
-
-        # No ego paint at this v. Do not guess from metric X (it collapses
-        # at range). Caller keeps the last image index if it has one.
-        return None, 0.0
-
-    def _lane_rank(self, u_model, v_model, x_3d, y_fwd, ego_left, ego_right):
-        idx, _ = self._lane_from_image(
-            u_model, v_model, x_3d, y_fwd, ego_left, ego_right
-        )
-        if idx is None:
-            return 99
-        return abs(int(idx))
-
     def _predict_cv(self, st, dt):
         dt = float(np.clip(dt, 0.01, 0.12))
         x, vx, xp00, xp01, xp11 = _kf_predict(
@@ -448,6 +331,12 @@ class CIPOTracker:
         if xr < xl:
             xl, xr = xr, xl
         return xl, xr
+
+    @staticmethod
+    def _ego_fill_width(lane_world):
+        if lane_world is not None and lane_world.valid:
+            return float(lane_world.ego_width)
+        return float(STANDARD_LANE_WIDTH)
 
     def _range_margin(self, z):
         base = float(_cfg("CIPO_X_MARGIN_M", 0.40))
@@ -600,6 +489,7 @@ class CIPOTracker:
             "lane_rank": int(st.get("lane_rank", 1)),
             "lane_index": int(st.get("lane_index", 0)),
             "lane_offset_m": float(st.get("lane_offset_m", 0.0)),
+            "lane_reason": str(st.get("lane_reason", "")),
             "vx": float(st.get("vx", 0.0)),
             "vy": float(st.get("vy", 0.0)),
             "show_bev": True,
@@ -715,10 +605,13 @@ class CIPOTracker:
         right_corridor_3d=None,
         dt=1.0 / 15.0,
         ego_speed_mps=None,
+        lane_world=None,
     ):
         """
         Range is gated ground-plane from the box bottom in *source* pixels.
         BEV Kalman [x,y,vx,vy] with R(d²/hf). OpenLane P stays for lanes.
+        Lane index is the lane of `lane_world` containing the track's (x, y),
+        judged at the track's own range.
         """
         processed_objects = []
         w_img, h_img = frame_size
@@ -809,14 +702,12 @@ class CIPOTracker:
             else:
                 score = None
             in_path, path_score = self._in_path_from_score(tr.track_id, score)
-            lane_index, lane_offset = self._lane_from_image(
-                tr.u_model, tr.v_model, x, z, ego_left, ego_right,
-                u1_model, u2_model, left_corridor_3d, right_corridor_3d,
-            )
-            if lane_index is None:
-                prev = self._lane_last.get(tr.track_id)
-                if prev is not None:
-                    lane_index, lane_offset = int(prev[0]), float(prev[1])
+            if lane_world is not None:
+                lane_index, lane_offset, lane_reason = self.lane_assigner.update(
+                    tr.track_id, x, z, lane_world
+                )
+            else:
+                lane_index, lane_offset, lane_reason = None, 0.0, "no lane model"
             if lane_index is None:
                 lane_rank = 99
                 packed_index = 99
@@ -825,14 +716,13 @@ class CIPOTracker:
                 packed_index = int(lane_index)
                 lane_rank = abs(packed_index)
                 in_path_lane = packed_index == 0
-                self._lane_last[tr.track_id] = (
-                    packed_index, float(lane_offset), self._hist_frame,
-                )
-            # Occupancy may overlap a neighbour; CIPO only if the photo says ego.
+            # Occupancy may overlap a neighbour; CIPO only if the car is in the ego lane.
             tr.in_path = bool(in_path) and in_path_lane
-            # No paint / weak occupancy still leaves a centered ego-lane car
-            # as in-path so the box follows CIPO (red / amber / cyan).
-            if in_path_lane and not tr.in_path and (score is None or abs(x) <= 2.2):
+            # Weak occupancy still leaves a well-centred ego-lane car in-path
+            # so the box follows CIPO (red / amber / cyan).
+            if in_path_lane and not tr.in_path and (
+                score is None or abs(lane_offset) <= 0.25 * self._ego_fill_width(lane_world)
+            ):
                 tr.in_path = True
                 if path_score <= 0.0:
                     path_score = 0.45
@@ -851,7 +741,8 @@ class CIPOTracker:
                 "v_model": tr.v_model,
                 "lane_rank": lane_rank,
                 "lane_index": packed_index,
-                "lane_offset_m": float(np.clip(lane_offset, -1.15, 1.15)),
+                "lane_offset_m": float(lane_offset),
+                "lane_reason": lane_reason,
                 "range_gate": tr.range_gate,
             }
             processed_objects.append(self._pack_obj(st, tr.in_path, path_score, quality))
@@ -860,10 +751,7 @@ class CIPOTracker:
             k: v for k, v in self._inpath_state.items()
             if int(v.get("last_frame", 0)) >= self._hist_frame - self._hist_ttl
         }
-        self._lane_last = {
-            k: v for k, v in self._lane_last.items()
-            if int(v[2]) >= self._hist_frame - self._hist_ttl
-        }
+        self.lane_assigner.drop(self.bev.tracks.keys())
 
         cipo_obj = self._select_cipo(processed_objects)
         if cipo_obj is not None:

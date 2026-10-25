@@ -3,7 +3,8 @@
 LDW only arms above 25 mph and FCW above 15 mph, and the cluster shows the
 speed figure, so the pipeline needs the vehicle's speed from somewhere:
 
-    auto            per-frame JSON log next to the video (Garmin HUD OCR), else none
+    auto            per-frame JSON log next to the video, else the Garmin HUD
+                    on the frame itself. Never another clip's log.
     json            the JSON log only
     none            unknown speed (LDW stays off, FCW still runs)
     fixed:<v><unit> a constant, e.g. fixed:65mph or fixed:100kmh (bench demos)
@@ -14,17 +15,10 @@ speed figure, so the pipeline needs the vehicle's speed from somewhere:
 
 from __future__ import annotations
 
-import os
 import re
 import threading
 import time
 from typing import Optional
-
-# Temporary stand-in when the open video has no *_speed.json beside it.
-# Garmin OCR log: 39 mph at the start, one sample per frame.
-_FALLBACK_SPEED_JSON = os.path.abspath(os.path.join(
-    os.path.dirname(__file__), "..", "..", "GRMN6693_540_speed.json",
-))
 
 MPH_TO_MPS = 0.44704
 KMH_TO_MPS = 1.0 / 3.6
@@ -33,6 +27,10 @@ KMH_TO_MPS = 1.0 / 3.6
 class SpeedSource:
     name = "none"
     label = ""          # short text for the cluster (e.g. "OBD-II", "log")
+
+    def observe(self, frame, frame_index: int):
+        """Optional per-frame update. JSON and fixed sources ignore the image."""
+        return None
 
     def get_mps(self, frame_index: int) -> Optional[float]:
         return None
@@ -50,6 +48,64 @@ class JsonSpeedSource(SpeedSource):
 
     def get_mps(self, frame_index):
         return self._log.get_mps(frame_index, min_mps=0.0)
+
+
+class HudSpeedSource(SpeedSource):
+    """Read ``NN MPH`` from a Garmin bottom bar on the current frame.
+
+    Used when the open video has no speed JSON. Another clip's log is never
+    substituted. A failed read holds the last good value; a jump bigger than
+    ``max_jump`` mph is dropped as an OCR spike.
+    """
+
+    name = "hud"
+    label = "Garmin HUD"
+
+    def __init__(self, max_jump: int = 8):
+        self._mph = None
+        self._max_jump = int(max_jump)
+        self._tmpl = None
+        self._pending = None
+        self._pending_hits = 0
+
+    def observe(self, frame, frame_index: int):
+        if frame is None:
+            return
+        from src.utils.ego_speed import read_hud_speed_mph
+        if self._tmpl is None:
+            import os
+            from src.utils.ego_speed import _MPH_TEMPLATE_PATH
+            import cv2
+            if os.path.isfile(_MPH_TEMPLATE_PATH):
+                self._tmpl = cv2.imread(_MPH_TEMPLATE_PATH, cv2.IMREAD_GRAYSCALE)
+            else:
+                self._tmpl = False
+        tmpl = self._tmpl if self._tmpl is not False else None
+        mph = read_hud_speed_mph(frame, tmpl)
+        if mph is None:
+            return
+        mph = int(mph)
+        if self._mph is None or abs(mph - int(self._mph)) <= self._max_jump:
+            self._mph = mph
+            self._pending = None
+            self._pending_hits = 0
+            return
+        # Garmin steps the HUD, and a stop can become 30 in one update.
+        # A one-frame misread must not stick; the same new number twice does.
+        if self._pending == mph:
+            self._pending_hits += 1
+        else:
+            self._pending = mph
+            self._pending_hits = 1
+        if self._pending_hits >= 2:
+            self._mph = mph
+            self._pending = None
+            self._pending_hits = 0
+
+    def get_mps(self, frame_index):
+        if self._mph is None:
+            return None
+        return float(self._mph) * MPH_TO_MPS
 
 
 class FixedSpeedSource(SpeedSource):
@@ -125,16 +181,11 @@ def make_speed_source(spec: Optional[str], video_path: Optional[str] = None) -> 
                 log = None
             if log is not None:
                 return JsonSpeedSource(log)
-        if os.path.isfile(_FALLBACK_SPEED_JSON):
-            from src.utils.ego_speed import EgoSpeedLog
-            print(
-                f"[ADAS] No speed log for {video_path}; using {_FALLBACK_SPEED_JSON}",
-                flush=True,
-            )
-            return JsonSpeedSource(EgoSpeedLog.from_json(_FALLBACK_SPEED_JSON))
         if low == "json":
             print(f"[ADAS] No speed JSON for {video_path}; speed unknown", flush=True)
-        return SpeedSource()
+            return SpeedSource()
+        # auto: the frame may carry a Garmin HUD. No other video's log.
+        return HudSpeedSource()
     if low == "none":
         return SpeedSource()
     m = _FIXED_RE.match(spec)

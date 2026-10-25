@@ -63,6 +63,14 @@ BEV_PIN_EGO_TO_LANE_CENTER = True
 LANE_RELOCK_SNAP_M = 1.2
 
 
+def road_shape(c1: float, c2: float, c3: float, y, y_max: float) -> np.ndarray:
+    """Lateral road shape at range y; curvature continues linearly past y_max."""
+    y = np.asarray(y, dtype=np.float64)
+    yc = np.minimum(y, float(y_max))
+    curv = c2 * yc ** 2 + c3 * yc ** 3 + (2.0 * c2 * yc + 3.0 * c3 * yc ** 2) * (y - yc)
+    return c1 * y + curv
+
+
 class LaneFrameModel:
     """Temporal ego-pose + road-shape estimate driving a lane-anchored render."""
 
@@ -89,6 +97,31 @@ class LaneFrameModel:
         self.miss = 0
         self.valid = False
         self.relock_jump_m = 0.0
+        self._shape_max_y: Optional[float] = None
+
+    def set_world(self, state, speed_mps: Optional[float] = None,
+                  dt: float = 1.0 / 30.0) -> bool:
+        """Take pose and shape from a LaneWorldState instead of fitting a corridor.
+
+        The world already tracks boundaries through relocks, so no EMA or relock
+        snap is applied here: c0 is the ego-lane centre, c1..c3 the road shape.
+        """
+        v = 0.0 if speed_mps is None else max(0.0, float(speed_mps))
+        self.distance += v * max(0.0, float(dt))
+        self.relock_jump_m = 0.0
+        if state is None or not state.valid:
+            self.miss += 1
+            self.valid = False
+            self._c = None
+            return False
+        self._c = np.array(
+            [state.ego_center, state.c1, state.c2, state.c3], dtype=np.float64
+        )
+        self._half_w = 0.5 * float(state.ego_width)
+        self._shape_max_y = float(cfg.LW_SHAPE_MAX_Y_M)
+        self.miss = self.miss + 1 if state.held else 0
+        self.valid = True
+        return True
 
     # ------------------------------------------------------------------ state
     @property
@@ -204,6 +237,8 @@ class LaneFrameModel:
         y = np.asarray(ys, dtype=np.float64)
         if self._c is None:
             return np.zeros_like(y)
+        if self._shape_max_y is not None:
+            return road_shape(0.0, self._c[2], self._c[3], y, self._shape_max_y)
         return self._c[2] * y ** 2 + self._c[3] * y ** 3
 
     def centerline(self, y_max: float = FIT_MAX_Y_M, n: int = 48):

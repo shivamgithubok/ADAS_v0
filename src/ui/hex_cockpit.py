@@ -667,8 +667,7 @@ class HexCockpit(QWidget):
 
         isa = alerts.get("isa") or {}
         posted = isa.get("posted_mph")
-        cand = isa.get("candidate_mph")
-        self.lbl_limit.set_limit(posted if posted is not None else cand)
+        self.lbl_limit.set_limit(posted)
 
         fcw = str(alerts.get("fcw") or "OFF")
         fcw_on = fcw in ("FCW", "FCW+")

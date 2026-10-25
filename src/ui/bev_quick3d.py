@@ -4,14 +4,19 @@ Qt Quick 3D BEV viewport.
 Embeds a View3D inside the existing QWidget cockpit via QQuickWidget.
 Same public API as BEVWidget so main_window can swap backends.
 
-Geometry is built in the *lane frame* (see src/tracking/lane_frame.py): the lane
-is pinned to the canvas and the ego car moves and yaws within it, which is what
-production cockpits do. Everything is sampled uniformly along Y with a constant
-point count, so the QML segment pools no longer pop as anchor visibility changes.
+The ego car is the origin. Geometry is drawn in the ego frame with the ego's
+heading relative to the road removed (x - c1*y), so the road runs up the screen.
+Lane lines sit at the physical boundary offsets tracked by ``LaneWorld``, and
+each vehicle at its own measured lateral position, kept inside the lane it was
+assigned to at its own range. Nothing is placed by ``lane_index * width``, so
+a detector relock cannot move a car to another lane on screen. Everything is
+sampled uniformly along Y with a constant point count, so the QML segment
+pools never pop as anchor visibility changes.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 import os
@@ -38,7 +43,8 @@ from src.ui.car_assets import (
     asset_url,
 )
 from src.tracking.lane_frame import LaneFrameModel
-from src.tracking.lane_assignment import LaneAssigner, LaneModel, place_in_lane
+from src.tracking.lane_assignment import LaneModel
+from src.tracking.lane_world import SLOTS, LaneWorld, boundary_ids
 from src.tracking.heading import CROSS_MODES, HeadingEstimator
 from src.tracking.ego_pose import EgoPose
 from src.utils.drivable_area import parse_lane_components
@@ -83,12 +89,6 @@ _QML_PATH = os.path.join(os.path.dirname(__file__), "qml", "BevScene.qml")
 _ENV_MODES = ("auto", "day", "dusk", "night", "demo")
 
 
-# Only ignore detector buzz. A real lane change starts as a few tenths of a
-# metre; gating that (the old 0.40 m hold) kept the paint pinned while the
-# car was already crossing.
-SLIDE_START_M = 0.08
-
-
 def smooth_measurement(prev, measured, alpha=0.28, max_step=0.55):
     """Ease a noisy (x, y) detection. Caps the step so a bad frame cannot jump."""
     if prev is None:
@@ -106,101 +106,20 @@ def smooth_measurement(prev, measured, alpha=0.28, max_step=0.55):
     return (nx, ny)
 
 
-def lane_ladder(width_m, shift, visible=7.6):
-    """Four lane lines that slide, then hand off at the edge of the view.
+def ease_boundaries(disp, target, gain=0.3):
+    """Ease displayed boundary offsets toward the tracked ones.
 
-    The car stays fixed. ``shift`` moves every line (same sign as the lane
-    slide). The line that travels past ``visible`` drops out, and the next
-    slot on the opposite side comes into view, so the outer line leaves and
-    the one beside it takes that place.
+    Both dicts are keyed by road-fixed boundary id (``boundary_ids``). A
+    boundary seen for the first time starts at its tracked position and one no
+    longer tracked is dropped. Ids survive an ego lane change, so a line the
+    car crosses keeps travelling across it instead of being renumbered.
     """
-    w = max(2.8, min(4.6, float(width_m)))
-    shift = float(shift)
-    xs = []
-    for k in range(-3, 4):
-        x = (k + 0.5) * w - shift
-        if abs(x) <= float(visible):
-            xs.append(float(x))
-    neg = [x for x in xs if x < 0.0]
-    pos = [x for x in xs if x > 0.0]
-    left = max(neg) if neg else None
-    right = min(pos) if pos else None
-    rows = []
-    for x in xs:
-        if left is not None and abs(x - left) < 1e-6:
-            pal = 1
-        elif right is not None and abs(x - right) < 1e-6:
-            pal = 2
-        else:
-            pal = 0
-        rows.append((x, pal))
-    return rows
-
-
-def occupied_lane_center(width_m, shift):
-    """Screen position of the lane the ego car is in.
-
-    The car is fixed at 0. The centre is the midpoint of the two lines that
-    bracket it, so the drivable corridor stays in that lane while the lines
-    slide and moves into the next lane when the car crosses.
-    """
-    xs = sorted(x for x, _pal in lane_ladder(width_m, shift))
-    for a, b in zip(xs, xs[1:]):
-        if a <= 0.0 <= b:
-            return 0.5 * (float(a) + float(b))
-    return 0.0
-
-
-def continue_slide(measured, current, width, jump=0.0):
-    """Lane-slide target that does not reverse a change already on screen.
-
-    ``measured`` is the offset that puts the current ego pair on its detected
-    centre (about −c0), wrapped into one lane. The same picture repeats every
-    lane width, so a pair swap can be finished by easing a short step in the
-    direction the lines are already travelling.
-    """
-    w = max(2.8, float(width))
-    measured = float(measured)
-    current = float(current)
-    cands = [measured + n * w for n in range(-2, 3)]
-    if abs(float(jump)) >= 1.0 and abs(current) >= 0.45:
-        direction = 1.0 if current > 0.0 else -1.0
-        ahead = [c for c in cands if (c - current) * direction >= -0.2]
-        pool = ahead or cands
-        return float(min(pool, key=lambda c: abs(c - current)))
-    if abs(float(jump)) >= 1.0:
-        return measured
-    return float(min(cands, key=lambda c: abs(c - current)))
-
-
-def four_lane_offsets(width_m, detected=()):
-    """Four lane markings: left adjacent, ego left, ego right, right adjacent.
-
-    A detected line within 1.1 m of a slot replaces the synthetic parallel,
-    so the bird's-eye view uses the real paint when the net sees it.
-    Returns (x_m, pal) with pal 1/2 on the ego pair and 0 on the outer lines.
-    """
-    w = max(2.8, min(4.6, float(width_m)))
-    half = 0.5 * w
-    targets = [-1.5 * w, -half, half, 1.5 * w]
-    means = sorted(float(m) for m in detected)
-    used = set()
-    rows = []
-    for i, target in enumerate(targets):
-        best = None
-        best_d = 1.1
-        for j, mean in enumerate(means):
-            if j in used:
-                continue
-            dist = abs(mean - target)
-            if dist < best_d:
-                best, best_d = j, dist
-        x = means[best] if best is not None else target
-        if best is not None:
-            used.add(best)
-        pal = 1 if i == 1 else (2 if i == 2 else 0)
-        rows.append((float(x), pal))
-    return rows
+    out = {}
+    for bid, x in target.items():
+        prev = disp.get(bid)
+        x = float(x)
+        out[bid] = x if prev is None else float(prev) + float(gain) * (x - float(prev))
+    return out
 
 
 def lane_change_target(raw_offset, lane_left, lane_right):
@@ -228,22 +147,6 @@ def lane_change_target(raw_offset, lane_left, lane_right):
     else:
         yaw = float(max(-10.0, min(10.0, -target * 4.0)))
     return float(max(-4.2, min(4.2, target))), yaw
-
-
-def lane_slide_target(raw_offset, lane_valid, lane_left, lane_right):
-    """How far the lane paint should slide when a real lane change is underway.
-
-    The ego car stays put. Markings and vehicles share this shift, so a car
-    that was in a lane stays in that lane while the paint slides past the ego.
-    Returns 0 when the lane net has nothing locked.
-    """
-    if not lane_valid:
-        return 0.0
-    target, _yaw = lane_change_target(raw_offset, lane_left, lane_right)
-    departing = lane_left in ("caution", "warning") or lane_right in ("caution", "warning")
-    if not departing and abs(float(raw_offset)) < SLIDE_START_M:
-        return 0.0
-    return float(target)
 
 
 class _SlotTracker:
@@ -300,7 +203,12 @@ class _BevDriver:
         self.lane_frame = LaneFrameModel()
         self._slots = _SlotTracker()
         self._tid_slot = {}   # track_id → (mesh_kind, mesh_pool_index)
-        self._lane_assign = LaneAssigner(max_index=TRAFFIC_LANE_MAX)
+        # Fallback when the caller does not hand over the pipeline's lane world.
+        self._own_world = LaneWorld()
+        self._world = None
+        self._view_world = None
+        self._bound_target = {}   # road-fixed boundary id -> offset at y=0 (m)
+        self._bound_disp = {}     # same, eased for display
         self._heading = HeadingEstimator()
         self._kind_vote = {}  # tid -> {truck, hits}
         self._ego_pose = EgoPose()
@@ -332,12 +240,6 @@ class _BevDriver:
         self._track_motion = {}
         self._track_target = {}
         self._traffic_shown = []
-        self._lane_slide = 0.0
-        self._lane_slide_target = 0.0
-        self._slide_measured = 0.0
-        self._frame_relock = False
-        self._lane_bias = {}
-        self._lane_index_seen = {}
         self._corridor_x = 0.0
         self._motion_t = time.perf_counter()
         self._mini_bev = "{}"
@@ -497,28 +399,70 @@ class _BevDriver:
             return False
         if math.hypot(x, z) > BEV_DISK_R_M:
             return False
-        # Lateral hide uses image lane index, not metric X (X is a different camera).
-        if int(obj.get("lane_rank", 0)) > TRAFFIC_LANE_MAX:
-            return False
-        if abs(int(obj.get("lane_index", 0))) > TRAFFIC_LANE_MAX:
-            return False
-        if abs(x) > BEV_MAX_LATERAL_M and obj.get("lane_index") is None:
-            return False
-        return True
+        lane = self._object_lane(obj)
+        if lane is None:
+            return abs(x) <= BEV_MAX_LATERAL_M
+        return abs(int(lane)) <= TRAFFIC_LANE_MAX
 
     def _lane_width_m(self) -> float:
         if self.lane_frame.valid:
             return max(2.8, min(4.6, float(self.lane_frame.lane_width)))
         return DEFAULT_LANE_W_M
 
-    def _measured_lane_slot(self, obj) -> int:
-        """Lane index at the object's own range. Never force in-path to slot 0."""
-        z = max(1.0, float(obj.get("Z_3d", 1.0)))
-        x_cam = float(obj.get("X_3d", 0.0))
-        x_lf = self._traffic_x(x_cam, z)
-        w = self._lane_width_m()
-        raw = int(round(x_lf / w))
-        return int(np.clip(raw, -TRAFFIC_LANE_MAX, TRAFFIC_LANE_MAX))
+    def _object_lane(self, obj):
+        """The tracker's lane label, else the lane at the object's own range."""
+        idx = obj.get("lane_index")
+        if idx is not None and int(idx) != 99:
+            return int(idx)
+        w = self._world
+        if w is None or not w.valid:
+            return None
+        return int(w.lane_of(float(obj.get("X_3d", 0.0)), float(obj.get("Z_3d", 0.0))).index)
+
+    def _render_x(self, x, z):
+        """Ego-frame x with the ego heading removed, the frame every layer is drawn in."""
+        if not self.lane_frame.valid or self.lane_frame._c is None:
+            return float(x)
+        return float(x) - float(self.lane_frame._c[1]) * float(z)
+
+    def _sync_world(self, world):
+        """Adopt this frame's lane world; boundary targets keyed by road-fixed id."""
+        self._world = world
+        if world is None or not world.valid:
+            self._bound_target = {}
+            self._bound_disp = {}
+            self._view_world = None
+            return
+        ids = boundary_ids(world.ego_lane_id)
+        self._bound_target = {ids[k]: world.offset(k) for k in SLOTS}
+        if not self._bound_disp:
+            self._bound_disp = dict(self._bound_target)
+        self._refresh_view_world()
+
+    def _refresh_view_world(self):
+        """World as drawn: eased offsets, heading removed. Clamps use this one."""
+        w = self._world
+        if w is None or not w.valid:
+            self._view_world = None
+            return
+        ids = boundary_ids(w.ego_lane_id)
+        offs = tuple(
+            float(self._bound_disp.get(ids[k], w.offset(k))) for k in SLOTS
+        )
+        self._view_world = dataclasses.replace(w, offsets=offs, c1=0.0)
+
+    def _display_lines(self):
+        """(x at y=0, pal) for the four drawn boundaries; pal 1/2 is the ego pair."""
+        vw = self._view_world
+        if vw is None:
+            return []
+        pal = {-2: 0, -1: 1, 1: 2, 2: 0}
+        return [(vw.offset(k), pal[k]) for k in SLOTS]
+
+    def _ego_lane_center(self):
+        """Centre of the ego lane at the car, as drawn."""
+        vw = self._view_world
+        return 0.0 if vw is None else float(vw.ego_center)
 
     def _heading_yaw(self, obj, y, lane_model):
         """Lane tangent, or world-velocity class when ego speed is known."""
@@ -677,11 +621,11 @@ class _BevDriver:
         if not self.lane_frame.valid:
             return []
         ys = np.linspace(CORRIDOR_START_M, CORRIDOR_DRAW_M, POLY_SAMPLES)
-        xs = self.lane_frame.lane_x(ys)
+        xs = self.lane_frame.lane_x(ys) + float(self._corridor_x)
         rows = self._poly_segments(
             ys, xs, 0.08, max_segs=CORRIDOR_SEGS, y_min=CORRIDOR_START_M,
         )
-        return self._with_lane_slide(rows[:18])
+        return rows[:18]
 
     def _paint_speed_mps(self):
         """Scroll rate for the lane paint. Real speed when we have it."""
@@ -711,18 +655,8 @@ class _BevDriver:
             self._last_corridor_json = corr
             self._set("corridorJson", corr)
 
-    def _with_lane_slide(self, rows):
-        """Shift lane-frame geometry with the paint. Vehicles use the same shift."""
-        s = float(self._lane_slide)
-        if abs(s) < 1e-4 or not rows:
-            return rows
-        for row in rows:
-            if "x" in row:
-                row["x"] = round(float(row["x"]) - s, 2)
-        return rows
-
     def _ease_ego(self):
-        """Hold the ego car. Lane paint slides; the car yaws into the turn."""
+        """Hold the ego car at the origin; it yaws into a turn or departure."""
         self._ego_target = 0.0
         self._ego_disp += 0.14 * (float(self._ego_target) - self._ego_disp)
         if abs(self._ego_disp) < 0.004 and abs(self._ego_target) < 0.004:
@@ -732,37 +666,26 @@ class _BevDriver:
             self._depart_yaw_disp = 0.0
         self._set("egoX", round(float(self._ego_disp), 3))
         self._set("egoYawDeg", round(-self._turn_yaw_deg + self._depart_yaw_disp, 2))
-        self._set("laneSlide", round(float(self._lane_slide), 3))
 
-    def _ease_slide(self):
-        err = float(self._lane_slide_target) - float(self._lane_slide)
-        # Follow a drift quickly. A lane-width error is the identity change:
-        # cover it in about a second and a half so the lines travel across the
-        # car instead of snapping onto the new lane.
-        if abs(err) > 1.2:
-            gain = 0.045
-        elif abs(err) > 0.35:
-            gain = 0.10
-        else:
-            gain = 0.18
-        self._lane_slide += gain * err
-        if abs(self._lane_slide) < 0.01 and abs(self._lane_slide_target) < 0.01:
-            self._lane_slide = 0.0
-        # The corridor is the ego path, not a stripe of the lane being left.
-        # It eases into whichever lane currently contains the car.
-        if self.lane_frame.valid:
-            want = occupied_lane_center(self._lane_width_m(), self._lane_slide)
-        else:
-            want = 0.0
+    def _ease_lanes(self):
+        """Ease drawn boundaries toward the tracked ones; corridor to the ego lane.
+
+        The lines are at physical offsets from the car, so ego lateral motion
+        and a lane change show as the lines moving across a fixed car. After an
+        ego lane change the corridor eases into the new lane.
+        """
+        self._bound_disp = ease_boundaries(self._bound_disp, self._bound_target)
+        self._refresh_view_world()
+        want = self._ego_lane_center()
         self._corridor_x += 0.22 * (float(want) - float(self._corridor_x))
-        if abs(self._corridor_x) < 0.02 and abs(want) < 0.02:
-            self._corridor_x = 0.0
+        if abs(self._corridor_x - want) < 0.005:
+            self._corridor_x = float(want)
 
     def _dash_payload(self):
         """Four lane markings scrolling toward the ego. Ego pair can turn red."""
         if not self.lane_frame.valid:
             return []
-        lines = lane_ladder(self._lane_width_m(), self._lane_slide)
+        lines = self._display_lines()
         spans = [
             (a, b) for a, b in self.lane_frame.dash_spans(
                 BEV_MAX_DIST_M, phase_m=self._paint_m, max_dashes=5,
@@ -854,7 +777,6 @@ class _BevDriver:
         rows = []
         if not objs:
             self._tid_slot = {}
-            self._lane_assign.drop([])
             self._heading.drop([])
             self._kind_vote = {}
             self._track_smooth = {}
@@ -868,16 +790,11 @@ class _BevDriver:
             if tid > 0:
                 live.add(tid)
         self._tid_slot = {tid: slot for tid, slot in self._tid_slot.items() if tid in live}
-        self._lane_assign.drop(live)
         self._heading.drop(live)
         self._kind_vote = {t: s for t, s in self._kind_vote.items() if t in live}
         self._track_smooth = {t: p for t, p in self._track_smooth.items() if t in live}
         self._track_motion = {t: p for t, p in self._track_motion.items() if t in live}
         self._track_target = {t: p for t, p in self._track_target.items() if t in live}
-        self._lane_bias = {t: b for t, b in self._lane_bias.items() if t in live}
-        self._lane_index_seen = {
-            t: i for t, i in self._lane_index_seen.items() if t in live
-        }
 
         cipo = self._pick_cipo(visible)
         cipo_tid = int(cipo.get("track_id", -999)) if cipo is not None else None
@@ -899,59 +816,19 @@ class _BevDriver:
             if z <= EGO_KEEP_OUT_M:
                 continue
 
-            x_cam = float(obj.get("X_3d", 0.0))
-            raw_off = float(obj.get("lane_offset_m", 0.0))
-            if "lane_index" in obj:
-                raw_idx = int(obj.get("lane_index", 0))
-                if abs(raw_idx) > TRAFFIC_LANE_MAX:
-                    continue
-                lane_slot, off = self._lane_assign.update_index(tid, raw_idx, raw_off)
-            else:
-                lane_slot, off = self._lane_assign.update(tid, x_cam, z, lane_model)
-            if lane_slot is None:
-                lane_slot = self._measured_lane_slot(obj)
-                off = raw_off
-            if abs(int(lane_slot or 0)) > TRAFFIC_LANE_MAX:
+            lane = self._object_lane(obj)
+            if lane is not None and abs(int(lane)) > TRAFFIC_LANE_MAX:
                 continue
-            pending.append((obj, tid, int(lane_slot), z, float(off)))
+            x_r = self._render_x(float(obj.get("X_3d", 0.0)), z)
+            pending.append((obj, tid, 99 if lane is None else int(lane), z, x_r))
 
         pending = self._spread_same_lane(pending)
 
-        for obj, tid, lane_slot, z, off in pending:
-            # A pair swap renumbers every lane. Keep the mesh in the lane it
-            # was already drawn in; the slide keeps travelling the same way.
-            if tid not in self._lane_bias:
-                self._lane_bias[tid] = self._slide_unwrap_n()
-            elif tid in self._lane_index_seen:
-                delta = int(lane_slot) - int(self._lane_index_seen[tid])
-                unwrap = self._slide_unwrap_n()
-                # The ego pair was renumbered. Cancel that while the slide is
-                # still expressed in the lane the car was leaving.
-                if (
-                    delta != 0
-                    and abs(unwrap) >= 1
-                    and abs(delta + unwrap - int(self._lane_bias[tid])) <= 1
-                ):
-                    self._lane_bias[tid] = int(self._lane_bias[tid]) - delta
-            self._lane_index_seen[tid] = int(lane_slot)
-            lane_slot = int(lane_slot) + int(self._lane_bias[tid])
-
+        for obj, tid, lane_slot, z, x_r in pending:
             yaw, mode = self._heading_yaw(obj, z, lane_model)
-            if mode in CROSS_MODES:
-                x = float(self._traffic_x(float(obj.get("X_3d", 0.0)), z))
-                y = float(z)
-            else:
-                w = self._lane_width_m()
-                if lane_model is not None:
-                    x_meas = float(lane_model.lane_center_x(int(lane_slot), z)) + float(off)
-                else:
-                    x_meas = float(lane_slot) * w + float(off)
-                x, y = place_in_lane(
-                    x_meas, z, lane_model, int(lane_slot),
-                    snap_strength=0.0, offset_clamp_m=1.15,
-                )
-                if lane_model is None:
-                    x, y = float(x_meas), z
+            x, y = float(x_r), float(z)
+            if mode not in CROSS_MODES and lane_slot != 99:
+                x = self._clamp_in_lane(x, y, lane_slot, obj)
 
             bound = self._alloc_slot(tid, self._prefer_kind(obj))
             if bound is None:
@@ -992,6 +869,21 @@ class _BevDriver:
         self._track_target = {t: p for t, p in self._track_target.items() if t in kept}
         return rows
 
+    def _clamp_in_lane(self, x, y, lane, obj):
+        """Keep the drawn body inside its assigned lane, as drawn at range y.
+
+        The measured position is kept wherever it already agrees with the
+        label; it is only pulled in where the body would overhang a line,
+        so the picture never contradicts the lane the object was assigned to.
+        """
+        vw = self._view_world
+        if vw is None:
+            return float(x)
+        lo, hi = vw.lane_bounds(int(lane), float(y))
+        half_body = 0.9 if str(obj.get("label", "car")).lower() not in TRUCK_LABELS else 1.25
+        half = min(half_body, max(0.0, 0.5 * (hi - lo) - 0.15))
+        return float(np.clip(float(x), lo + half, hi - half))
+
     @staticmethod
     def _spread_same_lane(pending):
         """Keep two cars in one lane from stacking: nearer stays, farther slides back."""
@@ -1004,11 +896,11 @@ class _BevDriver:
         for _lane, items in by_lane.items():
             items.sort(key=lambda t: t[3])
             last_z = None
-            for obj, tid, lane_slot, z, off in items:
+            for obj, tid, lane_slot, z, x in items:
                 if last_z is not None and z < last_z + SAME_LANE_GAP_M:
                     z = last_z + SAME_LANE_GAP_M
                 last_z = z
-                out.append((obj, tid, lane_slot, z, off))
+                out.append((obj, tid, lane_slot, z, x))
         return out
 
     def set_paused(self, paused):
@@ -1022,14 +914,13 @@ class _BevDriver:
 
     def _compose_shown(self):
         shown = []
-        shift = float(self._lane_slide)
         for row in self._traffic_seed or []:
             tid = int(row.get("tid", -1))
             st = self._track_motion.get(tid)
             if st is None:
                 continue
             item = dict(row)
-            item["posX"] = round(float(st["x"]) - shift, 2)
+            item["posX"] = round(float(st["x"]), 2)
             item["posZ"] = round(-float(st["y"]), 2)
             shown.append(item)
         return shown
@@ -1064,24 +955,23 @@ class _BevDriver:
         if chev_json != self._last_chevron_json:
             self._last_chevron_json = chev_json
             self._set("chevronJson", chev_json)
-        self._set("cipoX", round(-float(self._lane_slide), 3))
-        self._set("laneSlide", round(float(self._lane_slide), 3))
+        self._set("cipoX", round(float(self._corridor_x), 3))
+        self._refresh_mini_bev()
 
     def _on_extrap_tick(self):
         if self._scene_paused:
             return
-        before = float(self._lane_slide)
+        before = dict(self._bound_disp)
         before_c = float(self._corridor_x)
-        self._ease_slide()
+        self._ease_lanes()
         self._advance_paint()
         self._ease_ego()
-        moved = (
-            abs(float(self._lane_slide) - before) > 0.012
-            or abs(float(self._corridor_x) - before_c) > 0.012
+        moved = abs(float(self._corridor_x) - before_c) > 0.012 or any(
+            abs(float(x) - float(before.get(bid, x))) > 0.012
+            for bid, x in self._bound_disp.items()
         )
         if moved:
             self._publish_slid_geometry()
-            self._publish_traffic()
 
     def mini_bev_json(self):
         return self._mini_bev
@@ -1089,15 +979,15 @@ class _BevDriver:
     def _refresh_mini_bev(self):
         lines = []
         if self.lane_frame.valid:
-            lines = [
-                round(float(x), 2)
-                for x, _pal in lane_ladder(self._lane_width_m(), self._lane_slide)
-            ]
+            lines = [round(float(x), 2) for x, _pal in self._display_lines()]
         cars = []
         for row in self._traffic_shown or []:
+            y = -float(row.get("posZ", 0.0))
+            # The mini map draws the lanes straight, so take the curve out of the cars too.
+            bend = float(self.lane_frame.lane_x(np.array([y]))[0]) if self.lane_frame.valid else 0.0
             cars.append({
-                "x": round(float(row.get("posX", 0.0)), 2),
-                "y": round(-float(row.get("posZ", 0.0)), 1),
+                "x": round(float(row.get("posX", 0.0)) - bend, 2),
+                "y": round(y, 1),
                 "t": int(row.get("thr", 0)),
             })
         payload = {
@@ -1166,11 +1056,6 @@ class _BevDriver:
                 r["i"] = k
         return mode, rows
 
-    def _traffic_x(self, x, z):
-        if not self.lane_frame.valid:
-            return x
-        return self.lane_frame.point_to_lane_frame(x, z)
-
     def _pick_cipo(self, objs):
         vis = [o for o in objs if self._bev_visible(o)]
         if not vis:
@@ -1197,44 +1082,17 @@ class _BevDriver:
             self._set("cipoVisible", False)
             return
         self._set("cipoVisible", True)
-        # CIPO stays on the ego-lane centre, and slides with that lane.
-        self._set("cipoX", round(-float(self._lane_slide), 3))
+        # CIPO beacon rides the ego-lane centre.
+        self._set("cipoX", round(float(self._corridor_x), 3))
         self._set("cipoZ", round(-z, 2))
 
-    def _slide_unwrap_n(self):
-        w = float(self._lane_width_m())
-        if w < 1.0:
-            return 0
-        return int(round((float(self._lane_slide) - float(self._slide_measured)) / w))
-
     def _push_ego_pose(self):
-        # Lane change with a real lock: the ego stays in frame and the four
-        # markings slide. Vehicles take the same shift, so each one stays in
-        # the lane it was detected in. The nose still yaws toward the departure.
+        # The car stays at the origin; only the nose yaws toward a departure.
         raw = 0.0
-        if self.lane_frame.valid and self.lane_frame._c is not None:
-            raw = float(np.clip(
-                -float(self.lane_frame._c[0]),
-                -self._lane_width_m(), self._lane_width_m(),
-            ))
+        if self._world is not None and self._world.valid:
+            raw = float(self._world.ego_offset_in_lane)
         left, right = self._lane_states
         _ignored, self._depart_yaw = lane_change_target(raw, left, right)
-        jump = float(self.lane_frame.relock_jump_m) if self.lane_frame.valid else 0.0
-        self._frame_relock = abs(jump) >= 1.0
-        if self._frame_relock:
-            # Geometry only. A warning must not pull the ladder back across
-            # the lane the car is leaving.
-            measured = float(raw)
-        else:
-            measured = lane_slide_target(
-                raw, bool(self.lane_frame.valid), left, right,
-            )
-        self._slide_measured = float(measured)
-        # Finish a swap by a short step in the direction already on screen.
-        # Easing back to the wrapped centre is what made the video change vanish.
-        self._lane_slide_target = continue_slide(
-            measured, self._lane_slide, self._lane_width_m(), jump,
-        )
         self._ego_target = 0.0
         # Brief 3rd-person turn: yaw the ego GLB from v·κ, counter-yaw the
         # world a little, then both EMA back to heading-up (0). Do not apply
@@ -1253,7 +1111,7 @@ class _BevDriver:
         self._set("worldYawDeg", round(self._world_flash_deg, 2))
         self._set("laneValid", bool(self.lane_frame.valid))
         self._set("laneHeld", bool(self.lane_frame.held))
-        self._ease_slide()
+        self._ease_lanes()
         self._ease_ego()
 
     def update_bev_data(
@@ -1285,7 +1143,13 @@ class _BevDriver:
         self.right_3d = right_3d
 
         self._ego_speed_mps = None if speed_mps is None else float(speed_mps)
-        self.lane_frame.update(left_3d, right_3d, speed_mps=speed_mps, dt=dt)
+        alerts = alerts or {}
+        world = alerts.get("lane_world")
+        if world is None:
+            lines = [l for l in (left_3d, right_3d) if l is not None]
+            world = self._own_world.update(lines, dt=dt, speed_mps=speed_mps)
+        self.lane_frame.set_world(world, speed_mps=speed_mps, dt=dt)
+        self._sync_world(world)
         kappa = (2.0 * float(self.lane_frame.curvature)) if self.lane_frame.valid else None
         self._ego_pose.update(dt, speed_mps, kappa=kappa)
         if not self.lane_frame.valid:
@@ -1294,7 +1158,6 @@ class _BevDriver:
 
         self._push_ego_pose()
         self._push_cipo(self.processed_objs, cipo_status)
-        alerts = alerts or {}
         self._set("ldwSide", str(alerts.get("ldw_side") or alerts.get("ldw") or ""))
         self._set("fcwLevel", str(alerts.get("fcw") or "OFF"))
 

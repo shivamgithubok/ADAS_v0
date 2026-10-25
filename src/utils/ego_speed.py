@@ -129,16 +129,26 @@ def _digit_templates():
 
 
 def _ncc_digit(norm: np.ndarray) -> Optional[int]:
-    best_d, best_s = None, 0.50
+    """Best template match. The runner-up must lose by a clear margin.
+
+    3/8 and 5/6 share a lot of ink; a bare threshold lets the wrong glyph win.
+    """
     n = (norm > 0).astype(np.float32)
     n_std = float(n.std()) + 1e-6
+    scores = []
     for digit, tmpl in _digit_templates().items():
         t = cv2.resize(tmpl, (12, 18), interpolation=cv2.INTER_NEAREST)
         t = (t > 0).astype(np.float32)
         t_std = float(t.std()) + 1e-6
         score = float(((n - n.mean()) * (t - t.mean())).mean() / (n_std * t_std))
-        if score > best_s:
-            best_s, best_d = score, digit
+        scores.append((score, digit))
+    if not scores:
+        return None
+    scores.sort(reverse=True)
+    best_s, best_d = scores[0]
+    second = scores[1][0] if len(scores) > 1 else 0.0
+    if best_s < 0.45 or (best_s - second) < 0.04:
+        return None
     return best_d
 
 
@@ -265,9 +275,15 @@ def read_hud_speed_mph(frame: np.ndarray, mph_template: Optional[np.ndarray] = N
     runs = _split_digit_blobs(bw)
     if not runs:
         return None
-    keep = [(a, b) for a, b in runs if b > bw.shape[1] - 28]
-    if not keep:
-        keep = runs[-2:]
+    # The speed is the rightmost glyph group. Longitude digits sit to the
+    # left across a wider gap, and a stopped "0" is a single glyph.
+    groups = [[runs[0]]]
+    for prev, cur in zip(runs, runs[1:]):
+        if cur[0] - prev[1] >= 8:
+            groups.append([cur])
+        else:
+            groups[-1].append(cur)
+    keep = groups[-1][-2:]
     blobs = [bw[:, a:b] for a, b in keep if (bw[:, a:b]).sum() >= 20]
     if not blobs:
         return None

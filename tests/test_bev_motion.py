@@ -1,5 +1,6 @@
-"""Lane-change motion, four-lane bird's-eye marks, and detection smoothing."""
+"""Bird's-eye placement in the ego frame, lane-change motion, and detection smoothing."""
 
+import json
 import os
 import sys
 
@@ -7,52 +8,35 @@ import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from src.inference.postprocess import ANCHOR_Y_STEPS
 from src.tracking.lane_frame import LaneFrameModel
-from src.ui.bev_quick3d import (
-    four_lane_offsets,
-    lane_change_target,
-    lane_ladder,
-    lane_slide_target,
-    occupied_lane_center,
-    continue_slide,
-    smooth_measurement,
-)
+from src.tracking.lane_world import LaneWorld, ObjectLaneAssigner
+from src.ui.bev_quick3d import ease_boundaries, lane_change_target, smooth_measurement
+
+W = 3.7
+DT = 0.05
 
 
 def _pair(center, half=1.85):
     ys = np.linspace(5.0, 50.0, 12)
-    left = np.column_stack([np.full_like(ys, center - half), ys])
-    right = np.column_stack([np.full_like(ys, center + half), ys])
+    z = np.zeros_like(ys)
+    left = np.column_stack([np.full_like(ys, center - half), ys, z])
+    right = np.column_stack([np.full_like(ys, center + half), ys, z])
     return left, right
 
 
-def test_lane_ladder_hands_the_outer_line_off():
-    w = 3.7
-    before = [x for x, _pal in lane_ladder(w, 0.0)]
-    after = [x for x, _pal in lane_ladder(w, w)]
-    assert len(before) == 4 and len(after) == 4
-    # The old second line now sits where the old outer line was.
-    assert abs(after[0] - (before[1] - w)) < 0.05
-    # A new line has come in on the right, in the old outer slot.
-    assert abs(after[-1] - before[-1]) < 0.05
-    assert abs(after[-2] - (before[-1] - w)) < 0.05
+def _road(shift=0.0):
+    ys = ANCHOR_Y_STEPS.astype(np.float64)
+    out = []
+    for k in range(-3, 3):
+        x = (k + 0.5) * W - shift
+        if abs(x) < 8.0:
+            out.append(np.column_stack([np.full_like(ys, x), ys, np.zeros_like(ys)]).astype(np.float32))
+    return out
 
 
-def test_corridor_follows_the_lane_the_car_is_in():
-    w = 3.7
-    assert abs(occupied_lane_center(w, 0.0)) < 0.05
-    # Still in the original lane: the corridor has slid with that lane.
-    drifting = occupied_lane_center(w, 1.2)
-    assert drifting < -0.8
-    # After the car has crossed, the corridor is in the lane now under it.
-    entered = occupied_lane_center(w, w)
-    assert abs(entered) < 0.3
-
-
-def test_painted_corridor_is_in_the_lane_under_the_car():
+def _driver():
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from types import SimpleNamespace
-
     from PySide6.QtCore import QCoreApplication, QObject
 
     from src.ui.bev_quick3d import BevSceneDriver
@@ -60,36 +44,155 @@ def test_painted_corridor_is_in_the_lane_under_the_car():
     app = QCoreApplication.instance() or QCoreApplication([])
     drv = BevSceneDriver(QObject())
     drv._extrap.stop()
-    left, right = _pair(0.0)
-    drv.update_bev_data([], [], left_3d=left, right_3d=right, speed_mps=20.0, dt=0.05)
-    drv._threat = SimpleNamespace(lead=SimpleNamespace(level=2, range_m=40.0))
-    drv._lane_slide = 3.7
-    drv._lane_slide_target = 3.7
+    return app, drv
+
+
+def _settle(drv, n=40):
+    for _ in range(n):
+        drv._ease_lanes()
+    drv._publish_slid_geometry()
+    drv._publish_traffic()
+    return json.loads(drv.mini_bev_json())
+
+
+def _band(lanes, x):
+    return next((i for i, (a, b) in enumerate(zip(lanes, lanes[1:])) if a < x < b), None)
+
+
+def test_ease_boundaries_starts_new_lines_in_place_and_drops_old_ones():
+    disp = {0: -1.85, 1: 1.85}
+    out = ease_boundaries(disp, {0: -1.65, 1: 2.05, 2: 5.6}, gain=0.5)
+    assert abs(out[0] + 1.75) < 1e-9 and abs(out[1] - 1.95) < 1e-9
+    assert out[2] == 5.6
+    out = ease_boundaries(out, {1: 2.05, 2: 5.6})
+    assert 0 not in out
+
+
+def test_lane_lines_are_drawn_at_the_physical_boundaries():
+    app, drv = _driver()
+    lw = LaneWorld()
+    xs = [-6.0, -2.1, 2.0, 5.1]
+    ys = ANCHOR_Y_STEPS.astype(np.float64)
+    lines = [
+        np.column_stack([np.full_like(ys, x), ys, np.zeros_like(ys)]).astype(np.float32)
+        for x in xs
+    ]
     for _ in range(40):
-        drv._ease_slide()
-    rows = drv._corridor_payload()
-    assert rows
-    mean_x = sum(r["x"] for r in rows) / len(rows)
-    # A full lane of line travel used to park the band one lane to the left.
-    assert abs(mean_x) < 0.45
+        st = lw.update(lines, dt=DT, speed_mps=20.0)
+        drv.update_bev_data([], [], speed_mps=20.0, dt=DT, alerts={"lane_world": st})
+    mini = _settle(drv)
+    assert np.allclose(mini["lanes"], xs, atol=0.15)
+    assert abs(mini["w"] - 4.1) < 0.2
     drv._extrap.stop()
     del app
 
 
-def test_four_lane_marks_use_detections():
-    marks = four_lane_offsets(3.7, detected=[-5.4, -1.7, 1.9, 5.6])
-    assert len(marks) == 4
-    xs = [m[0] for m in marks]
-    assert xs[0] < xs[1] < xs[2] < xs[3]
-    assert abs(xs[1] - (-1.7)) < 0.2
-    assert abs(xs[2] - 1.9) < 0.2
-    assert [m[1] for m in marks] == [0, 1, 2, 0]
+def test_adjacent_car_is_drawn_in_the_adjacent_lane():
+    """The GRMN6693 case: a car in the left lane must not be drawn two lanes over."""
+    app, drv = _driver()
+    lw = LaneWorld()
+    asg = ObjectLaneAssigner()
+    obj = {"track_id": 3, "X_3d": -3.8, "Z_3d": 14.0, "label": "car",
+           "bbox": [0, 0, 80, 40], "vx": 0.0, "vy": 0.0}
+    for _ in range(30):
+        st = lw.update(_road(), dt=DT, speed_mps=20.0)
+        obj["lane_index"] = asg.update(3, obj["X_3d"], obj["Z_3d"], st)[0]
+        drv.update_bev_data([], [obj], speed_mps=20.0, dt=DT, alerts={"lane_world": st})
+    mini = _settle(drv)
+    assert obj["lane_index"] == -1
+    assert _band(mini["lanes"], mini["cars"][0]["x"]) == 0
+    drv._extrap.stop()
+    del app
 
 
-def test_four_lane_marks_without_detections():
-    marks = four_lane_offsets(3.7, detected=[])
-    assert len(marks) == 4
-    assert marks[1][0] < 0 < marks[2][0]
+def test_ego_lane_change_moves_lines_not_cars():
+    """Ego changes lane right; a car parked in that lane ends up dead ahead, smoothly."""
+    app, drv = _driver()
+    lw = LaneWorld()
+    asg = ObjectLaneAssigner()
+    obj = {"track_id": 4, "X_3d": W, "Z_3d": 30.0, "label": "car",
+           "bbox": [0, 0, 80, 40], "vx": 0.0, "vy": 0.0}
+    for _ in range(20):
+        st = lw.update(_road(), dt=DT, speed_mps=20.0)
+        obj["lane_index"] = asg.update(4, obj["X_3d"], 30.0, st)[0]
+        drv.update_bev_data([], [obj], speed_mps=20.0, dt=DT, alerts={"lane_world": st})
+    xs, bands = [], []
+    for d in np.linspace(0.0, W, 60):
+        st = lw.update(_road(float(d)), dt=DT, speed_mps=20.0)
+        obj["X_3d"] = W - float(d)
+        obj["lane_index"] = asg.update(4, obj["X_3d"], 30.0, st)[0]
+        drv.update_bev_data([], [obj], speed_mps=20.0, dt=DT, alerts={"lane_world": st})
+        for _ in range(2):
+            drv._ease_lanes()
+        drv._publish_traffic()
+        mini = json.loads(drv.mini_bev_json())
+        xs.append(mini["cars"][0]["x"])
+        bands.append(_band(mini["lanes"], xs[-1]))
+    assert st.lane_changes == 1 and st.ego_lane_id == 1
+    steps = np.abs(np.diff(xs))
+    assert steps.max() < 0.6, "the car must not jump a lane when the ego lane is renumbered"
+    mini = _settle(drv)
+    assert _band(mini["lanes"], mini["cars"][0]["x"]) == 1
+    assert abs(mini["cars"][0]["x"]) < 0.6
+    drv._extrap.stop()
+    del app
+
+
+def test_detector_relock_does_not_jump_lines_or_cars():
+    """Frames that only see the neighbour pair: the drawn road and the car stay put."""
+    app, drv = _driver()
+    lw = LaneWorld()
+    asg = ObjectLaneAssigner()
+    obj = {"track_id": 5, "X_3d": 0.2, "Z_3d": 28.0, "label": "car",
+           "bbox": [0, 0, 80, 40], "vx": 0.0, "vy": 0.0}
+    for _ in range(30):
+        st = lw.update(_road(), dt=DT, speed_mps=20.0)
+        obj["lane_index"] = asg.update(5, 0.2, 28.0, st)[0]
+        drv.update_bev_data([], [obj], speed_mps=20.0, dt=DT, alerts={"lane_world": st})
+    before = _settle(drv)
+    for _ in range(20):
+        lines = [l for l in _road() if l[0, 0] > 0.0]
+        st = lw.update(lines, dt=DT, speed_mps=20.0)
+        obj["lane_index"] = asg.update(5, 0.2, 28.0, st)[0]
+        drv.update_bev_data([], [obj], speed_mps=20.0, dt=DT, alerts={"lane_world": st})
+        mini = _settle(drv, 2)
+        assert np.allclose(mini["lanes"], before["lanes"], atol=0.3)
+        assert abs(mini["cars"][0]["x"] - before["cars"][0]["x"]) < 0.3
+    assert st.lane_changes == 0
+    drv._extrap.stop()
+    del app
+
+
+def test_corridor_fallback_without_a_pipeline_world():
+    """Callers that only pass the ego corridor still get a lane world."""
+    app, drv = _driver()
+    left, right = _pair(0.0)
+    for _ in range(10):
+        drv.update_bev_data([], [], left_3d=left, right_3d=right, speed_mps=20.0, dt=DT)
+    mini = _settle(drv)
+    assert len(mini["lanes"]) == 4
+    assert mini["lanes"][1] < 0.0 < mini["lanes"][2]
+    drv._extrap.stop()
+    del app
+
+
+def test_painted_corridor_is_in_the_ego_lane():
+    from types import SimpleNamespace
+
+    app, drv = _driver()
+    lw = LaneWorld()
+    for _ in range(20):
+        st = lw.update(_road(0.8), dt=DT, speed_mps=20.0)
+        drv.update_bev_data([], [], speed_mps=20.0, dt=DT, alerts={"lane_world": st})
+    _settle(drv)
+    drv._threat = SimpleNamespace(lead=SimpleNamespace(level=2, range_m=40.0))
+    rows = drv._corridor_payload()
+    assert rows
+    mean_x = sum(r["x"] for r in rows) / len(rows)
+    # The car sits 0.8 m right of its lane centre; the band is on the lane, not the car.
+    assert abs(mean_x + 0.8) < 0.2
+    drv._extrap.stop()
+    del app
 
 
 def test_lane_change_slides_the_car():
@@ -108,126 +211,9 @@ def test_lane_relock_is_reported():
     left, right = _pair(0.0)
     assert model.update(left, right, speed_mps=20.0, dt=0.05)
     assert model.relock_jump_m == 0.0
-    # Next lane is about one width to the right of the camera origin.
     left, right = _pair(3.7)
     assert model.update(left, right, speed_mps=20.0, dt=0.05)
     assert abs(model.relock_jump_m) > 1.2
-
-
-def test_lane_slide_only_when_lanes_are_real():
-    assert lane_slide_target(1.6, False, "normal", "normal") == 0.0
-    assert abs(lane_slide_target(0.1, True, "normal", "normal") - 0.1) < 1e-6
-    assert abs(lane_slide_target(1.6, True, "normal", "normal") - 1.6) < 1e-6
-    warned = lane_slide_target(0.1, True, "normal", "warning")
-    assert warned >= 0.75
-    # A warning on the line just crossed must not reverse the lane slide.
-    assert abs(lane_slide_target(3.2, True, "warning", "normal") - 3.2) < 1e-6
-
-
-def test_pair_swap_continues_the_slide_instead_of_reversing():
-    w = 3.7
-    # Already 1.7 m into a rightward change. The tracker then locks the next
-    # pair, whose wrapped centre is on the other side of zero.
-    assert abs(continue_slide(-1.2, 1.7, w, jump=2.9) - 2.5) < 0.05
-    # From rest, the swap itself is the maneuver and the paint has to travel.
-    assert abs(continue_slide(-3.7, 0.0, w, jump=3.7) - (-3.7)) < 1e-6
-
-
-def test_video_style_swap_keeps_the_car_in_its_lane():
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    import json
-    from PySide6.QtCore import QCoreApplication, QObject
-
-    from src.ui.bev_quick3d import BevSceneDriver
-
-    app = QCoreApplication.instance() or QCoreApplication([])
-    drv = BevSceneDriver(QObject())
-    drv._extrap.stop()
-    lead = {
-        "track_id": 4, "X_3d": 0.0, "Z_3d": 30.0, "lane_offset_m": 0.0,
-        "lane_index": 0, "label": "car", "bbox": [0, 0, 80, 40],
-        "vx": 0.0, "vy": 0.0,
-    }
-    for center in (0.0, -0.6, -1.2, -1.7):
-        left, right = _pair(center)
-        drv.update_bev_data([], [lead], left_3d=left, right_3d=right, speed_mps=20.0, dt=0.05)
-        for _ in range(18):
-            drv._ease_slide()
-        drv._refresh_mini_bev()
-    before = json.loads(drv.mini_bev_json())
-    slide_at_swap = float(drv._lane_slide)
-    assert slide_at_swap > 1.0
-    assert min(before["lanes"]) < -4.0
-    lead["lane_index"] = -1
-    left, right = _pair(1.2)
-    xs = []
-    for _ in range(8):
-        drv.update_bev_data([], [lead], left_3d=left, right_3d=right, speed_mps=20.0, dt=0.05)
-        for _e in range(4):
-            drv._ease_slide()
-        drv._publish_traffic()
-        xs.append(json.loads(drv.mini_bev_json())["cars"][0]["x"])
-    after = json.loads(drv.mini_bev_json())
-    # Lines keep travelling with the change. The lead stays in the lane it
-    # occupied; the index renumber does not throw it across the road.
-    assert drv._lane_slide > slide_at_swap + 0.3
-    assert max(xs) - min(xs) < 2.2
-    lanes = after["lanes"]
-    assert any(a < xs[-1] < b for a, b in zip(lanes, lanes[1:]))
-    drv._extrap.stop()
-    del app
-
-
-def test_relock_slides_one_lane_and_keeps_the_object():
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    import json
-    from PySide6.QtCore import QCoreApplication, QObject
-
-    from src.ui.bev_quick3d import BevSceneDriver
-
-    app = QCoreApplication.instance() or QCoreApplication([])
-    drv = BevSceneDriver(QObject())
-    drv._extrap.stop()
-    obj = {
-        "track_id": 4,
-        "X_3d": 0.1,
-        "Z_3d": 28.0,
-        "lane_offset_m": 0.1,
-        "lane_index": 0,
-        "label": "car",
-        "bbox": [0, 0, 80, 40],
-        "vx": 0.0,
-        "vy": 0.0,
-    }
-    left, right = _pair(0.0)
-    for _ in range(8):
-        drv.update_bev_data([], [obj], left_3d=left, right_3d=right, speed_mps=20.0, dt=0.05)
-    before = json.loads(drv.mini_bev_json())
-    left, right = _pair(3.7)
-    drv.update_bev_data([], [obj], left_3d=left, right_3d=right, speed_mps=20.0, dt=0.05)
-    jumped = json.loads(drv.mini_bev_json())
-    # The re-lock must not teleport the paint. The shift is the ease.
-    assert abs(jumped["lanes"][1] - before["lanes"][1]) < 1.2
-
-    def follow(prev, lanes):
-        return min(lanes, key=lambda x: abs(x - prev))
-
-    tracked = before["lanes"][1]
-    samples = [tracked]
-    for _ in range(24):
-        drv._ease_slide()
-        drv._publish_traffic()
-        lanes = json.loads(drv.mini_bev_json())["lanes"]
-        tracked = follow(tracked, lanes)
-        samples.append(tracked)
-    assert abs(samples[-1] - samples[0]) > 2.0
-    steps = [abs(b - a) for a, b in zip(samples, samples[1:])]
-    assert max(steps) < 1.0
-    car = json.loads(drv.mini_bev_json())["cars"][0]
-    lanes = json.loads(drv.mini_bev_json())["lanes"]
-    assert any(a < car["x"] < b for a, b in zip(lanes, lanes[1:]))
-    drv._extrap.stop()
-    del app
 
 
 def test_new_car_appears_at_the_detection():
@@ -239,18 +225,10 @@ def test_new_car_appears_at_the_detection():
 
 
 def test_mini_bev_carries_the_departure_side():
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from PySide6.QtCore import QCoreApplication, QObject
-
-    from src.ui.bev_quick3d import BevSceneDriver
-
-    app = QCoreApplication.instance() or QCoreApplication([])
-    drv = BevSceneDriver(QObject())
-    drv._extrap.stop()
+    app, drv = _driver()
     drv._lane_states = ("warning", "normal")
     drv.lane_frame.valid = True
     drv._refresh_mini_bev()
-    import json
     mini = json.loads(drv.mini_bev_json())
     assert mini["left"] == "warning"
     assert mini["right"] == "normal"
@@ -269,59 +247,29 @@ def test_top_view_draws_a_car_icon():
 
 
 def test_driver_spots_the_car_on_the_detection():
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from PySide6.QtCore import QCoreApplication, QObject
-
-    from src.ui.bev_quick3d import BevSceneDriver
-
-    app = QCoreApplication.instance() or QCoreApplication([])
-    drv = BevSceneDriver(QObject())
-    drv._extrap.stop()
+    app, drv = _driver()
     obj = {
-        "track_id": 7,
-        "X_3d": 0.2,
-        "Z_3d": 32.0,
-        "lane_offset_m": 0.1,
-        "lane_index": 0,
-        "label": "car",
-        "bbox": [0, 0, 90, 50],
-        "vx": 0.0,
-        "vy": 0.0,
+        "track_id": 7, "X_3d": 0.2, "Z_3d": 32.0, "lane_offset_m": 0.1,
+        "lane_index": 0, "label": "car", "bbox": [0, 0, 90, 50], "vx": 0.0, "vy": 0.0,
     }
     left, right = _pair(0.0)
     drv.update_bev_data([], [obj], left_3d=left, right_3d=right, speed_mps=20.0, dt=0.05)
     assert drv._traffic_shown, "a detected car should be on the bird's-eye view"
     spawned = -float(drv._traffic_shown[0]["posZ"])
     assert abs(spawned - 32.0) < 1.5
-
-    left, right = _pair(1.7)
-    drv.update_bev_data([], [obj], left_3d=left, right_3d=right, speed_mps=20.0, dt=0.05)
-    for _ in range(36):
-        drv._ease_slide()
-    drv._publish_traffic()
-    import json
-    mini = json.loads(drv.mini_bev_json())
-    assert 4 <= len(mini["lanes"]) <= 5
+    mini = _settle(drv)
+    assert len(mini["lanes"]) == 4
     assert mini["ego"] == 0.0
-    assert abs(drv._lane_slide) > 0.6
     car = mini["cars"][0]
-    lanes = mini["lanes"]
-    assert any(a < car["x"] < b for a, b in zip(lanes, lanes[1:]))
+    assert _band(mini["lanes"], car["x"]) == 1
     drv._extrap.stop()
     del app
 
 
 def test_corridor_stripes_scroll_toward_the_car_at_ego_speed():
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from types import SimpleNamespace
 
-    from PySide6.QtCore import QCoreApplication, QObject
-
-    from src.ui.bev_quick3d import BevSceneDriver
-
-    app = QCoreApplication.instance() or QCoreApplication([])
-    drv = BevSceneDriver(QObject())
-    drv._extrap.stop()
+    app, drv = _driver()
     left, right = _pair(0.0)
     drv.update_bev_data([], [], left_3d=left, right_3d=right, speed_mps=20.0, dt=0.05)
     drv._threat = SimpleNamespace(lead=SimpleNamespace(level=2, range_m=40.0))

@@ -101,6 +101,36 @@ EGO_STICKY_INDEX = True
 LANE_CHANGE_CENTER_M = 0.97    # 1.2 / 1.235; |Δcorridor center| to start re-index
 LANE_CHANGE_DWELL_FRAMES = 10  # ~0.33 s at 30 fps; 3 frames was detector noise
 
+# --- Lane world (src/tracking/lane_world.py) ---
+# Ego-centred boundary slots (-2, -1 | ego | +1, +2). Physical units only.
+# Width bounds are loose on purpose: the network's metric lane width varies
+# ±25% with each camera's calibration, and only topology (which boundaries
+# bracket the car) decides lanes. 3.7 m is used only before any measurement.
+LW_WIDTH_MIN_M = 2.4
+LW_WIDTH_MAX_M = 5.6
+LW_WIDTH_DEFAULT_M = 3.7
+LW_OFFSET_MAX_Y_M = 30.0       # near-field samples that set a line's lateral offset
+LW_SHAPE_MAX_Y_M = 50.0        # samples used for heading / curvature; extrapolate linearly past it
+LW_GATE_M = 0.8                # detection ↔ tracked boundary association gate
+LW_GATE_UNSEEN_M = 1.1         # wider gate for a boundary not measured recently
+LW_COMMON_GAIN = 0.55          # share of mean innovation applied to every boundary (ego lateral motion)
+LW_SLOT_GAIN = 0.25            # per-boundary residual (lane width adaptation)
+LW_LC_MARGIN_M = 0.25          # ego centre must be this far past a boundary ...
+LW_LC_DWELL_S = 0.25           # ... for this long before the ego lane changes
+LW_CAND_MATCH_M = 0.5          # unmatched-line candidate frame-to-frame match
+LW_ADOPT_HITS = 6              # frames a candidate must have been seen ...
+LW_ADOPT_MISS = 8              # ... to replace a boundary unmeasured this many frames
+LW_RATE_ALPHA = 0.1            # EMA of "detected this frame" for boundaries and candidates
+LW_SWAP_CAND_RATE = 0.8        # a candidate this reliable may replace a boundary ...
+LW_SWAP_SLOT_RATE = 0.5        # ... whose own detections are this intermittent (a ghost)
+LW_RELOCK_S = 0.5              # lines visible but none match any boundary → re-acquire
+LW_HOLD_S = 3.0                # no lines at all → keep coasting the world this long
+LW_MIN_CONF_FOR_LANE_CHANGE = 0.3
+# Object lane assignment (per track, depth aware).
+OBJ_LANE_MARGIN_M = 0.15       # must be this far inside the new lane ...
+OBJ_LANE_MARGIN_PER_M = 0.008  # ... plus this per metre of range (lateral error grows with Y)
+OBJ_LANE_SWITCH_FRAMES = 3     # consecutive frames inside the new lane before relabel
+
 # --- One-sided ego reconstruct (P1) ---
 # If only one ego paint line is measured, rebuild the missing side from a
 # locked width. Visualization / BEV use it; CIPO treats this as probable
