@@ -748,193 +748,232 @@ Item {
             x: 280; y: 292; width: 300
             spacing: 0
 
-            // Telltales (ISO 2575-style). Green armed, red active, grey off.
-            Row {
-                anchors.horizontalCenter: parent.horizontalCenter
-                spacing: 24
-                height: 36
-                // FCW
-                Shape {
-                    id: ttFcwIcon
-                    width: 44; height: 34
-                    readonly property color c: app.stateColor(app.val("ttFcw", "off"))
-                    opacity: app.val("ttFcw", "off") === "active" ? 0.55 + 0.45 * app.pulse : 1
-                    ShapePath {
-                        strokeWidth: 0; fillColor: ttFcwIcon.c
-                        PathSvg { path: "M3 24 V18 L8 11 Q9.5 9 12 9 H22 Q24.5 9 26 11 L30 17 H32 Q35 17 35 20 V24 Z M6.5 26 a3.5 3.5 0 1 0 7 0 a3.5 3.5 0 1 0 -7 0 Z M24.5 26 a3.5 3.5 0 1 0 7 0 a3.5 3.5 0 1 0 -7 0 Z" }
+            // Three equal telltale badges, centered on the speed gauge.
+            Item {
+                width: 300
+                height: 46
+                Row {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    spacing: 18
+                    height: 46
+
+                    Item {
+                        id: badgeFcw
+                        width: 46; height: 46
+                        readonly property color c: app.stateColor(app.val("ttFcw", "off"))
+                        opacity: app.val("ttFcw", "off") === "active" ? 0.55 + 0.45 * app.pulse : 1
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: 23
+                            color: "#12121C"
+                            border.width: 1.6
+                            border.color: badgeFcw.c
+                        }
+                        Shape {
+                            id: ttFcwIcon
+                            width: 44; height: 34
+                            anchors.centerIn: parent
+                            scale: 0.52
+                            ShapePath {
+                                strokeWidth: 0; fillColor: badgeFcw.c
+                                PathSvg { path: "M3 24 V18 L8 11 Q9.5 9 12 9 H22 Q24.5 9 26 11 L30 17 H32 Q35 17 35 20 V24 Z M6.5 26 a3.5 3.5 0 1 0 7 0 a3.5 3.5 0 1 0 -7 0 Z M24.5 26 a3.5 3.5 0 1 0 7 0 a3.5 3.5 0 1 0 -7 0 Z" }
+                            }
+                            ShapePath {
+                                fillColor: "transparent"; strokeColor: badgeFcw.c
+                                strokeWidth: 2.6; capStyle: ShapePath.RoundCap
+                                PathSvg { path: "M38 9 L42 5 M39 15 H44 M38 21 L42 25" }
+                            }
+                        }
                     }
-                    ShapePath {
-                        fillColor: "transparent"; strokeColor: ttFcwIcon.c
-                        strokeWidth: 2.6; capStyle: ShapePath.RoundCap
-                        PathSvg { path: "M38 9 L42 5 M39 15 H44 M38 21 L42 25" }
+
+                    Item {
+                        id: badgeLdw
+                        width: 46; height: 46
+                        readonly property color c: app.stateColor(app.val("ttLdw", "off"))
+                        opacity: app.val("ttLdw", "off") === "active" ? 0.55 + 0.45 * app.pulse : 1
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: 23
+                            color: "#12121C"
+                            border.width: 1.6
+                            border.color: badgeLdw.c
+                        }
+                        Shape {
+                            id: ttLdwIcon
+                            width: 36; height: 32
+                            anchors.centerIn: parent
+                            scale: 0.62
+                            ShapePath {
+                                fillColor: "transparent"; strokeColor: badgeLdw.c
+                                strokeWidth: 2.6; capStyle: ShapePath.RoundCap
+                                PathSvg { path: "M7 30 L13 2 M29 30 L23 2" }
+                            }
+                            ShapePath {
+                                strokeWidth: 0; fillColor: badgeLdw.c
+                                PathSvg { path: "M15 14 H21 Q23 14 23 16 V25 Q23 27 21 27 H15 Q13 27 13 25 V16 Q13 14 15 14 Z" }
+                            }
+                        }
                     }
-                }
-                // LDW
-                Shape {
-                    id: ttLdwIcon
-                    width: 36; height: 32
-                    readonly property color c: app.stateColor(app.val("ttLdw", "off"))
-                    opacity: app.val("ttLdw", "off") === "active" ? 0.55 + 0.45 * app.pulse : 1
-                    ShapePath {
-                        fillColor: "transparent"; strokeColor: ttLdwIcon.c
-                        strokeWidth: 2.6; capStyle: ShapePath.RoundCap
-                        PathSvg { path: "M7 30 L13 2 M29 30 L23 2" }
-                    }
-                    ShapePath {
-                        strokeWidth: 0; fillColor: ttLdwIcon.c
-                        PathSvg { path: "M15 14 H21 Q23 14 23 16 V25 Q23 27 21 27 H15 Q13 27 13 25 V16 Q13 14 15 14 Z" }
-                    }
-                }
-                // ISA (sign recognition)
-                Rectangle {
-                    width: 26; height: 32; radius: 4
-                    anchors.verticalCenter: parent.verticalCenter
-                    color: "transparent"
-                    border.width: 2.4
-                    border.color: app.stateColor(app.val("ttIsa", "off"))
-                    Rectangle {
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        y: 7; width: 14; height: 2.4
-                        color: parent.border.color
-                    }
-                    Rectangle {
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        y: 13; width: 14; height: 10; radius: 2
-                        color: parent.border.color
+
+                    Item {
+                        id: badgeIsa
+                        width: 46; height: 46
+                        readonly property color c: app.stateColor(app.val("ttIsa", "off"))
+                        opacity: app.val("ttIsa", "off") === "active" ? 0.55 + 0.45 * app.pulse : 1
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: 23
+                            color: "#12121C"
+                            border.width: 1.6
+                            border.color: badgeIsa.c
+                        }
+                        Item {
+                            width: 26; height: 32
+                            anchors.centerIn: parent
+                            scale: 0.62
+                            Rectangle {
+                                anchors.fill: parent
+                                radius: 4
+                                color: "transparent"
+                                border.width: 2.4
+                                border.color: badgeIsa.c
+                                Rectangle {
+                                    anchors.horizontalCenter: parent.horizontalCenter
+                                    y: 7; width: 14; height: 2.4
+                                    color: badgeIsa.c
+                                }
+                                Rectangle {
+                                    anchors.horizontalCenter: parent.horizontalCenter
+                                    y: 13; width: 14; height: 10; radius: 2
+                                    color: badgeIsa.c
+                                }
+                            }
+                        }
                     }
                 }
             }
 
-            Item { width: 1; height: 12 }
+            Item { width: 1; height: 10 }
 
-            // Donut speed. Ticks run the full circle. The cyan arc starts at
-            // the lower left and travels along the bottom as speed rises.
+            // Open horseshoe. The arc wraps the top and both sides and stays
+            // open at the bottom. Cyan grows clockwise from the lower-left tip.
             Item {
                 width: 300
                 height: speedGauge.height
                 Item {
-                id: speedGauge
-                anchors.horizontalCenter: parent.horizontalCenter
-                width: 214
-                height: 214
+                    id: speedGauge
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    width: 206
+                    height: 206
 
-                readonly property string speedLabel: app.val("speedText", "--")
-                readonly property bool hasSpeed: speedLabel !== "--" && speedLabel !== ""
-                readonly property real speedValue: {
-                    const n = Number(speedLabel)
-                    return hasSpeed && !isNaN(n) ? Math.max(0, n) : 0
-                }
-                readonly property real speedMax: app.val("units", "mph") === "kmh" ? 260 : 160
-                // On screen, 0° is 3 o'clock and positive angles run clockwise.
-                // 152° is the lower left; a negative sweep travels along the bottom.
-                readonly property real startAngle: 152
-                readonly property real sweepMax: 230
-                property real sweep: hasSpeed
-                        ? -Math.min(1, speedValue / speedMax) * sweepMax : 0
-                readonly property real arcR: width / 2 - 9
-                readonly property real endAngle: startAngle + sweep
-                readonly property real tipX: width / 2 + arcR * Math.cos(endAngle * Math.PI / 180)
-                readonly property real tipY: height / 2 + arcR * Math.sin(endAngle * Math.PI / 180)
+                    readonly property string speedLabel: app.val("speedText", "--")
+                    readonly property bool hasSpeed: speedLabel !== "--" && speedLabel !== ""
+                    readonly property real speedValue: {
+                        const n = Number(speedLabel)
+                        return hasSpeed && !isNaN(n) ? Math.max(0, n) : 0
+                    }
+                    readonly property real speedMax: app.val("units", "mph") === "kmh" ? 260 : 160
+                    // On screen, 0° is 3 o'clock and positive angles run clockwise.
+                    // 150° is 8 o'clock. A +240° sweep ends at 4 o'clock.
+                    readonly property real startAngle: 150
+                    readonly property real trackSweep: 240
+                    property real sweep: hasSpeed
+                            ? Math.min(1, speedValue / speedMax) * trackSweep : 0
+                    readonly property real arcR: width / 2 - 8
 
-                Behavior on sweep {
-                    NumberAnimation { duration: 220; easing.type: Easing.OutCubic }
-                }
+                    Behavior on sweep {
+                        NumberAnimation { duration: 220; easing.type: Easing.OutCubic }
+                    }
 
-                Repeater {
-                    model: 60
+                    Shape {
+                        anchors.fill: parent
+                        ShapePath {
+                            strokeColor: Qt.rgba(232 / 255, 236 / 255, 242 / 255, 0.78)
+                            strokeWidth: 3.2
+                            fillColor: "transparent"
+                            capStyle: ShapePath.RoundCap
+                            PathAngleArc {
+                                centerX: speedGauge.width / 2
+                                centerY: speedGauge.height / 2
+                                radiusX: speedGauge.arcR
+                                radiusY: speedGauge.arcR
+                                startAngle: speedGauge.startAngle
+                                sweepAngle: speedGauge.trackSweep
+                            }
+                        }
+                    }
+
+                    Repeater {
+                        model: 6
+                        Item {
+                            width: 2
+                            height: speedGauge.height
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            rotation: 62 + index * 14
+                            Rectangle {
+                                width: 1.6
+                                height: index % 2 === 0 ? 8 : 5
+                                radius: 0.8
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                anchors.top: parent.top
+                                anchors.topMargin: 1
+                                antialiasing: true
+                                color: Qt.rgba(232 / 255, 236 / 255, 242 / 255, 0.8)
+                            }
+                        }
+                    }
+
+                    Shape {
+                        id: speedArc
+                        anchors.fill: parent
+                        visible: speedGauge.hasSpeed && speedGauge.sweep > 0.5
+                        ShapePath {
+                            strokeColor: app.infoCyan
+                            strokeWidth: 4.5
+                            fillColor: "transparent"
+                            capStyle: ShapePath.RoundCap
+                            PathAngleArc {
+                                centerX: speedGauge.width / 2
+                                centerY: speedGauge.height / 2
+                                radiusX: speedGauge.arcR
+                                radiusY: speedGauge.arcR
+                                startAngle: speedGauge.startAngle
+                                sweepAngle: speedGauge.sweep
+                            }
+                        }
+                    }
+
                     Item {
-                        width: 2
-                        height: speedGauge.height
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        rotation: index * 6
-                        Rectangle {
-                            readonly property bool major: index % 5 === 0
-                            width: major ? 2.2 : 1.4
-                            height: major ? 11 : 7
-                            radius: 1
+                        anchors.centerIn: parent
+                        anchors.verticalCenterOffset: -4
+                        width: Math.max(speedNum.implicitWidth, speedUnit.implicitWidth)
+                        height: speedNum.implicitHeight + speedUnit.implicitHeight - 6
+                        Text {
+                            id: speedNum
                             anchors.horizontalCenter: parent.horizontalCenter
                             anchors.top: parent.top
-                            anchors.topMargin: 2
-                            antialiasing: true
-                            color: major ? "#F4F7FB" : Qt.rgba(244 / 255, 247 / 255, 251 / 255, 0.42)
+                            text: speedGauge.speedLabel
+                            color: "#FFFFFF"
+                            font.family: app.displayFont
+                            font.pixelSize: 76
+                            font.weight: Font.Bold
+                            font.letterSpacing: -2
+                            font.features: { "tnum": 1 }
+                        }
+                        Text {
+                            id: speedUnit
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            anchors.top: speedNum.bottom
+                            anchors.topMargin: -6
+                            text: app.val("speedUnit", "MPH")
+                            color: app.textSecondary
+                            font.family: app.uiFont
+                            font.pixelSize: 15
+                            font.weight: Font.Medium
+                            font.letterSpacing: 1.4
                         }
                     }
                 }
-
-                Shape {
-                    id: speedArc
-                    anchors.fill: parent
-                    visible: speedGauge.hasSpeed && speedGauge.sweep < -0.5
-                    ShapePath {
-                        strokeColor: Qt.rgba(76 / 255, 214 / 255, 255 / 255, 0.30)
-                        strokeWidth: 14
-                        fillColor: "transparent"
-                        capStyle: ShapePath.RoundCap
-                        PathAngleArc {
-                            centerX: speedGauge.width / 2
-                            centerY: speedGauge.height / 2
-                            radiusX: speedGauge.arcR
-                            radiusY: speedGauge.arcR
-                            startAngle: speedGauge.startAngle
-                            sweepAngle: speedGauge.sweep
-                        }
-                    }
-                    ShapePath {
-                        strokeColor: app.infoCyan
-                        strokeWidth: 8
-                        fillColor: "transparent"
-                        capStyle: ShapePath.RoundCap
-                        PathAngleArc {
-                            centerX: speedGauge.width / 2
-                            centerY: speedGauge.height / 2
-                            radiusX: speedGauge.arcR
-                            radiusY: speedGauge.arcR
-                            startAngle: speedGauge.startAngle
-                            sweepAngle: speedGauge.sweep
-                        }
-                    }
-                }
-
-                Rectangle {
-                    visible: speedArc.visible
-                    width: 10
-                    height: 10
-                    radius: 5
-                    color: "#F4FDFF"
-                    x: speedGauge.tipX - width / 2
-                    y: speedGauge.tipY - height / 2
-                }
-
-                Item {
-                    anchors.centerIn: parent
-                    width: Math.max(speedNum.implicitWidth, speedUnit.implicitWidth)
-                    height: speedNum.implicitHeight + speedUnit.implicitHeight - 4
-                    Text {
-                        id: speedNum
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        anchors.top: parent.top
-                        text: speedGauge.speedLabel
-                        color: "#FFFFFF"
-                        font.family: app.displayFont
-                        font.pixelSize: 68
-                        font.weight: Font.Bold
-                        font.letterSpacing: -1
-                        font.features: { "tnum": 1 }
-                    }
-                    Text {
-                        id: speedUnit
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        anchors.top: speedNum.bottom
-                        anchors.topMargin: -4
-                        text: app.val("speedUnit", "MPH")
-                        color: app.textSecondary
-                        font.family: app.uiFont
-                        font.pixelSize: 16
-                        font.weight: Font.Medium
-                        font.letterSpacing: 1.6
-                    }
-                }
-            }
             }
             Text {
                 anchors.horizontalCenter: parent.horizontalCenter

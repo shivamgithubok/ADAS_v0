@@ -5,7 +5,23 @@ output/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
 *.egg-info/
+
+# Perception caches, replays, and debug dumps
+*.pkl
+*.csv
+*.log
+
+# Editor and OS junk
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
 
 # Local videos and speed logs
 videos/
@@ -73,8 +89,10 @@ src/surround_view/
 src/inference/tusimple_ufld.py
 src/inference/trt_depth_estimator.py
 
-# Scripts other than the app launcher and engine exporters
+# Scripts other than the app launcher and engine exporters.
+# scripts/debug/ is local replay and metric tooling, not part of the app.
 scripts/*
+scripts/debug/
 !scripts/run_pyside6_app.py
 !scripts/run_cluster.sh
 !scripts/export_yolo_orin.py
