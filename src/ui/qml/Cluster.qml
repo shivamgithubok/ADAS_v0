@@ -787,30 +787,55 @@ Item {
                     }
 
                     Item {
-                        id: badgeLdw
-                        width: 46; height: 46
-                        readonly property color c: app.stateColor(app.val("ttLdw", "off"))
-                        opacity: app.val("ttLdw", "off") === "active" ? 0.55 + 0.45 * app.pulse : 1
+                        id: laneMark
+                        width: 54; height: 46
+                        readonly property string side: {
+                            const s = String(app.val("ldwSide", ""))
+                            return (s === "LEFT" || s === "RIGHT") ? s : ""
+                        }
+                        readonly property color calm: "#F4F7FB"
+                        readonly property color glow: "#FFB14A"
+
                         Rectangle {
-                            anchors.fill: parent
-                            radius: 23
-                            color: "#12121C"
-                            border.width: 1.6
-                            border.color: badgeLdw.c
+                            visible: laneMark.side === "LEFT"
+                            x: 4; y: 6; width: 9; height: 32; radius: 4
+                            rotation: -10
+                            transformOrigin: Item.Center
+                            color: Qt.rgba(1, 0.70, 0.29, 0.28 + 0.28 * app.pulse)
+                        }
+                        Rectangle {
+                            x: 7; y: 7; width: 2.6; height: 30; radius: 1.2
+                            rotation: -10
+                            transformOrigin: Item.Center
+                            antialiasing: true
+                            color: laneMark.side === "LEFT" ? laneMark.glow : laneMark.calm
+                        }
+                        Rectangle {
+                            visible: laneMark.side === "RIGHT"
+                            x: 41; y: 6; width: 9; height: 32; radius: 4
+                            rotation: 10
+                            transformOrigin: Item.Center
+                            color: Qt.rgba(1, 0.70, 0.29, 0.28 + 0.28 * app.pulse)
+                        }
+                        Rectangle {
+                            x: 44; y: 7; width: 2.6; height: 30; radius: 1.2
+                            rotation: 10
+                            transformOrigin: Item.Center
+                            antialiasing: true
+                            color: laneMark.side === "RIGHT" ? laneMark.glow : laneMark.calm
                         }
                         Shape {
-                            id: ttLdwIcon
-                            width: 36; height: 32
+                            width: 16; height: 26
                             anchors.centerIn: parent
-                            scale: 0.62
                             ShapePath {
-                                fillColor: "transparent"; strokeColor: badgeLdw.c
-                                strokeWidth: 2.6; capStyle: ShapePath.RoundCap
-                                PathSvg { path: "M7 30 L13 2 M29 30 L23 2" }
+                                strokeWidth: 0
+                                fillColor: "#E8EEF4"
+                                PathSvg { path: "M8 1 Q14 2.2 14.2 8 L14.2 17 Q14.2 24 10.5 24.5 L5.5 24.5 Q1.8 24 1.8 17 L1.8 8 Q2 2.2 8 1 Z" }
                             }
                             ShapePath {
-                                strokeWidth: 0; fillColor: badgeLdw.c
-                                PathSvg { path: "M15 14 H21 Q23 14 23 16 V25 Q23 27 21 27 H15 Q13 27 13 25 V16 Q13 14 15 14 Z" }
+                                strokeWidth: 0
+                                fillColor: "#6E7886"
+                                PathSvg { path: "M4.2 7.2 H11.8 L11 13.2 H5 Z" }
                             }
                         }
                     }

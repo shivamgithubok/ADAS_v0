@@ -445,7 +445,10 @@ class ClusterController(QObject):
                 tt_ldw, ldw_text = "standby", ("Below 40 km/h" if kmh else "Below 25 mph")
             else:
                 tt_ldw, ldw_text = "armed", "Armed"
+        # Glow only the lane the car is actually leaving. Otherwise both stay white.
+        ldw_side = ldw if ldw in ("LEFT", "RIGHT") else ""
         hud.update(ttFcw=tt_fcw, fcwText=fcw_text, ttLdw=tt_ldw, ldwText=ldw_text,
+                   ldwSide=ldw_side,
                    ttIsa="armed" if caps.get("signs") else "off")
 
         # Perception status pill
